@@ -398,83 +398,6 @@ class ChartGenerator:
         return fig
 
     @staticmethod
-    @st.cache_data
-    def _run_how_many_simulation(weekly_throughput: tuple, normalized_weights: tuple, forecast_days: int) -> np.ndarray:
-        """Cached function to run the core 'how many' simulation."""
-        num_weeks = forecast_days / 7.0
-        num_full_weeks = int(num_weeks)
-        fractional_week_multiplier = num_weeks % 1
-        
-        simulations = np.random.choice(weekly_throughput, size=(Config.FORECASTING_SIMULATIONS, num_full_weeks), replace=True, p=normalized_weights)
-        forecast_counts = simulations.sum(axis=1)
-
-        if fractional_week_multiplier > 0:
-            last_week_sim = np.random.choice(weekly_throughput, size=Config.FORECASTING_SIMULATIONS, replace=True, p=normalized_weights)
-            forecast_counts += (last_week_sim * fractional_week_multiplier).astype(int)
-        
-        return forecast_counts
-
-    @staticmethod
-    def create_how_many_forecast_chart(df: DataFrame, forecast_days: int, throughput_status_col: str) -> Optional[Figure]:
-        """Prepares data and calls the cached simulation to create a 'How Many' forecast chart."""
-        weekly_throughput, normalized_weights = ChartGenerator._get_recent_weekly_throughput(df, throughput_status_col)
-        
-        if weekly_throughput is None:
-            return None
-
-        with st.spinner(f"Running {Config.FORECASTING_SIMULATIONS} weighted simulations..."):
-            forecast_counts = ChartGenerator._run_how_many_simulation(
-                tuple(weekly_throughput), tuple(normalized_weights), forecast_days
-            )
-
-        counts, bin_edges = np.histogram(forecast_counts, bins=30, range=(forecast_counts.min(), forecast_counts.max()))
-        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-
-        fig = go.Figure(data=[go.Bar(x=bin_centers, y=counts, name='Simulations')])
-        fig.update_layout(
-            title=f"Forecast: How Many Items in the Next {forecast_days} Days?",
-            xaxis_title="Number of Items Completed", yaxis_title="Frequency",
-            bargap=0.1, yaxis_range=[0, counts.max() * 1.20]
-        )
-
-        summary_text = f"**Forecast Summary (for next {forecast_days} days):**"
-        
-        for likelihood, percentile in sorted(Config.FORECAST_LIKELIHOODS.items(), reverse=True):
-            value = np.percentile(forecast_counts, percentile)
-            color = Config.PERCENTILE_COLORS.get(likelihood)
-            fig.add_vline(
-                x=value, line_dash="dash", line_color=color,
-                annotation_text=f"{likelihood}%: {int(value)}",
-                annotation_position="top left"
-            )
-            summary_text += f"\n- There is a **{likelihood}% chance** to complete **{int(value)} or more** items."
-        
-        st.markdown(summary_text)
-        return fig
-
-    @staticmethod
-    @st.cache_data
-    def _run_when_simulation(items_to_complete: int, _full_throughput_dataset: tuple, _weights: tuple) -> List[int]:
-        """A reusable, cached helper to run the 'when' simulation."""
-        completion_weeks_data = []
-        for _ in range(Config.FORECASTING_SIMULATIONS):
-            items_done = 0
-            weeks_elapsed = 0
-            timeout_weeks = max(300, (items_to_complete / np.mean(_full_throughput_dataset)) * 10 if np.mean(_full_throughput_dataset) > 0 else 300)
-
-            while items_done < items_to_complete:
-                if weeks_elapsed > timeout_weeks:
-                    weeks_elapsed = -1 
-                    break
-                items_done += np.random.choice(_full_throughput_dataset, p=_weights)
-                weeks_elapsed += 1
-            
-            if weeks_elapsed != -1:
-                completion_weeks_data.append(weeks_elapsed)
-        
-        return completion_weeks_data
-
-    @staticmethod
     def _get_recent_weekly_throughput(df: DataFrame, status_col: str) -> Tuple[Optional[pd.Series], Optional[np.ndarray]]:
         """Gets recent weekly throughput and calculates sampling weights."""
         if not status_col:
@@ -511,6 +434,63 @@ class ChartGenerator:
         return weekly_throughput, normalized_weights
 
     @staticmethod
+    def create_how_many_forecast_chart(df: DataFrame, forecast_days: int, throughput_status_col: str) -> Optional[Figure]:
+        """Prepares data and calls the cached simulation to create a 'How Many' forecast chart."""
+        weekly_throughput, normalized_weights = ChartGenerator._get_recent_weekly_throughput(df, throughput_status_col)
+        
+        if weekly_throughput is None:
+            return None
+
+        with st.spinner(f"Running {Config.FORECASTING_SIMULATIONS} weighted simulations..."):
+            # --- NEW AND CORRECTED LOGIC ---
+            num_weeks = forecast_days / 7.0
+            num_full_weeks = int(num_weeks)
+            fractional_week_multiplier = num_weeks % 1
+            
+            simulations = np.random.choice(
+                weekly_throughput, 
+                size=(Config.FORECASTING_SIMULATIONS, num_full_weeks), 
+                replace=True, 
+                p=normalized_weights
+            )
+            forecast_counts = simulations.sum(axis=1)
+
+            if fractional_week_multiplier > 0:
+                last_week_sim = np.random.choice(
+                    weekly_throughput, 
+                    size=Config.FORECASTING_SIMULATIONS, 
+                    replace=True, 
+                    p=normalized_weights
+                )
+                forecast_counts += (last_week_sim * fractional_week_multiplier).astype(int)
+            # --- END OF NEW LOGIC ---
+
+        counts, bin_edges = np.histogram(forecast_counts, bins=30, range=(forecast_counts.min(), forecast_counts.max()))
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+        fig = go.Figure(data=[go.Bar(x=bin_centers, y=counts, name='Simulations')])
+        fig.update_layout(
+            title=f"Forecast: How Many Items in the Next {forecast_days} Days?",
+            xaxis_title="Number of Items Completed", yaxis_title="Frequency",
+            bargap=0.1, yaxis_range=[0, counts.max() * 1.20]
+        )
+
+        summary_text = f"**Forecast Summary (for next {forecast_days} days):**"
+        
+        for likelihood, percentile in sorted(Config.FORECAST_LIKELIHOODS.items(), reverse=True):
+            value = np.percentile(forecast_counts, percentile)
+            color = Config.PERCENTILE_COLORS.get(likelihood)
+            fig.add_vline(
+                x=value, line_dash="dash", line_color=color,
+                annotation_text=f"{likelihood}%: {int(value)}",
+                annotation_position="top left"
+            )
+            summary_text += f"\n- There is a **{likelihood}% chance** to complete **{int(value)} or more** items."
+        
+        st.markdown(summary_text)
+        return fig
+
+    @staticmethod
     def create_when_forecast_chart(df: DataFrame, items_to_complete: int, start_date: datetime.date, throughput_status_col: str) -> Tuple[Optional[Figure], Optional[Dict[int, datetime]]]:
         """Creates the 'When' forecast chart by calling the cached simulation."""
         weekly_throughput, normalized_weights = ChartGenerator._get_recent_weekly_throughput(df, throughput_status_col)
@@ -519,9 +499,23 @@ class ChartGenerator:
             return None, None
 
         with st.spinner(f"Running {Config.FORECASTING_SIMULATIONS} 'when' simulations for {items_to_complete} items..."):
-            completion_weeks_data = ChartGenerator._run_when_simulation(
-                items_to_complete, tuple(weekly_throughput), tuple(normalized_weights)
-            )
+            # --- NEW AND CORRECTED LOGIC ---
+            completion_weeks_data = []
+            for _ in range(Config.FORECASTING_SIMULATIONS):
+                items_done = 0
+                weeks_elapsed = 0
+                timeout_weeks = max(300, (items_to_complete / weekly_throughput.mean()) * 20)
+
+                while items_done < items_to_complete:
+                    if weeks_elapsed > timeout_weeks:
+                        weeks_elapsed = -1 
+                        break
+                    items_done += np.random.choice(weekly_throughput, p=normalized_weights)
+                    weeks_elapsed += 1
+                
+                if weeks_elapsed != -1:
+                    completion_weeks_data.append(weeks_elapsed)
+            # --- END OF NEW LOGIC ---
 
         if not completion_weeks_data: return None, None
         
@@ -560,13 +554,12 @@ class ChartGenerator:
 
         if good_weeks.empty or bad_weeks.empty: return None
 
+        # --- NEW AND CORRECTED LOGIC ---
         # Run Good Week Scenario
         good_completion_weeks = []
         for _ in range(Config.FORECASTING_SIMULATIONS):
-            items_done = 0
-            weeks_elapsed = 0
-            items_done += np.random.choice(good_weeks)
-            weeks_elapsed += 1
+            items_done = np.random.choice(good_weeks) # First week is good (uniform random from good weeks)
+            weeks_elapsed = 1
             while items_done < items_to_complete:
                 items_done += np.random.choice(weekly_throughput, p=normalized_weights)
                 weeks_elapsed += 1
@@ -575,14 +568,13 @@ class ChartGenerator:
         # Run Bad Week Scenario
         bad_completion_weeks = []
         for _ in range(Config.FORECASTING_SIMULATIONS):
-            items_done = 0
-            weeks_elapsed = 0
-            items_done += np.random.choice(bad_weeks)
-            weeks_elapsed += 1
+            items_done = np.random.choice(bad_weeks) # First week is bad (uniform random from bad weeks)
+            weeks_elapsed = 1
             while items_done < items_to_complete:
                 items_done += np.random.choice(weekly_throughput, p=normalized_weights)
                 weeks_elapsed += 1
             bad_completion_weeks.append(weeks_elapsed)
+        # --- END OF NEW LOGIC ---
 
         scenario_results = {'good_week': {}, 'bad_week': {}, 'median': median_throughput}
         for p in Config.PERCENTILES:
