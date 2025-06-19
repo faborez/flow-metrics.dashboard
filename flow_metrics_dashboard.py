@@ -399,18 +399,18 @@ class ChartGenerator:
 
     @staticmethod
     @st.cache_data
-    def _run_how_many_simulation(weekly_throughput: pd.Series, normalized_weights: np.ndarray, forecast_days: int) -> np.ndarray:
+    def _run_how_many_simulation(weekly_throughput: tuple, normalized_weights: tuple, forecast_days: int) -> np.ndarray:
         """Cached function to run the core 'how many' simulation."""
         num_weeks = forecast_days / 7.0
-        num_simulation_weeks = int(np.ceil(num_weeks))
-        simulations = np.random.choice(weekly_throughput, (Config.FORECASTING_SIMULATIONS, num_simulation_weeks), replace=True, p=normalized_weights)
+        num_full_weeks = int(num_weeks)
+        fractional_week_multiplier = num_weeks % 1
         
+        simulations = np.random.choice(weekly_throughput, size=(Config.FORECASTING_SIMULATIONS, num_full_weeks), replace=True, p=normalized_weights)
         forecast_counts = simulations.sum(axis=1)
 
-        if num_weeks % 1 != 0:
-            fractional_week_multiplier = num_weeks % 1
-            last_week_simulation = np.random.choice(weekly_throughput, Config.FORECASTING_SIMULATIONS, replace=True, p=normalized_weights)
-            forecast_counts -= ((1 - fractional_week_multiplier) * last_week_simulation).astype(int)
+        if fractional_week_multiplier > 0:
+            last_week_sim = np.random.choice(weekly_throughput, size=Config.FORECASTING_SIMULATIONS, replace=True, p=normalized_weights)
+            forecast_counts += (last_week_sim * fractional_week_multiplier).astype(int)
         
         return forecast_counts
 
@@ -423,7 +423,9 @@ class ChartGenerator:
             return None
 
         with st.spinner(f"Running {Config.FORECASTING_SIMULATIONS} weighted simulations..."):
-            forecast_counts = ChartGenerator._run_how_many_simulation(weekly_throughput, normalized_weights, forecast_days)
+            forecast_counts = ChartGenerator._run_how_many_simulation(
+                tuple(weekly_throughput), tuple(normalized_weights), forecast_days
+            )
 
         counts, bin_edges = np.histogram(forecast_counts, bins=30, range=(forecast_counts.min(), forecast_counts.max()))
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
@@ -436,6 +438,7 @@ class ChartGenerator:
         )
 
         summary_text = f"**Forecast Summary (for next {forecast_days} days):**"
+        
         for likelihood, percentile in sorted(Config.FORECAST_LIKELIHOODS.items(), reverse=True):
             value = np.percentile(forecast_counts, percentile)
             color = Config.PERCENTILE_COLORS.get(likelihood)
@@ -451,33 +454,19 @@ class ChartGenerator:
 
     @staticmethod
     @st.cache_data
-    def _run_when_simulation(items_to_complete: int, _full_throughput_dataset: pd.Series, _weights: np.ndarray, _first_week_sample_dataset: Optional[pd.Series] = None) -> List[int]:
+    def _run_when_simulation(items_to_complete: int, _full_throughput_dataset: tuple, _weights: tuple) -> List[int]:
         """A reusable, cached helper to run the 'when' simulation."""
-        full_throughput_dataset = _full_throughput_dataset.to_numpy()
-        weights = _weights
-        first_week_sample_dataset = _first_week_sample_dataset.to_numpy() if _first_week_sample_dataset is not None else full_throughput_dataset
-
-        first_week_weights = None
-        if len(first_week_sample_dataset) < len(full_throughput_dataset):
-            # This logic is complex to re-align, simpler to just use uniform for the filtered set
-            first_week_weights = None 
-        else:
-            first_week_weights = weights
-
         completion_weeks_data = []
         for _ in range(Config.FORECASTING_SIMULATIONS):
-            weeks_elapsed = 0
             items_done = 0
-            timeout = max(300, (items_to_complete / full_throughput_dataset.mean()) * 10)
-
-            items_done += np.random.choice(first_week_sample_dataset, p=first_week_weights)
-            weeks_elapsed += 1
+            weeks_elapsed = 0
+            timeout_weeks = max(300, (items_to_complete / np.mean(_full_throughput_dataset)) * 10 if np.mean(_full_throughput_dataset) > 0 else 300)
 
             while items_done < items_to_complete:
-                if weeks_elapsed > timeout:
+                if weeks_elapsed > timeout_weeks:
                     weeks_elapsed = -1 
                     break
-                items_done += np.random.choice(full_throughput_dataset, p=weights)
+                items_done += np.random.choice(_full_throughput_dataset, p=_weights)
                 weeks_elapsed += 1
             
             if weeks_elapsed != -1:
@@ -530,7 +519,9 @@ class ChartGenerator:
             return None, None
 
         with st.spinner(f"Running {Config.FORECASTING_SIMULATIONS} 'when' simulations for {items_to_complete} items..."):
-            completion_weeks_data = ChartGenerator._run_when_simulation(items_to_complete, weekly_throughput, normalized_weights)
+            completion_weeks_data = ChartGenerator._run_when_simulation(
+                items_to_complete, tuple(weekly_throughput), tuple(normalized_weights)
+            )
 
         if not completion_weeks_data: return None, None
         
@@ -557,7 +548,7 @@ class ChartGenerator:
 
     @staticmethod
     def run_when_scenario_forecast(df: DataFrame, items_to_complete: int, start_date: datetime.date, throughput_status_col: str) -> Optional[Dict]:
-        """Runs the good week/bad week scenario analysis."""
+        """Runs the good week/bad week scenario analysis and returns the results."""
         weekly_throughput, normalized_weights = ChartGenerator._get_recent_weekly_throughput(df, throughput_status_col)
 
         if weekly_throughput is None or normalized_weights is None or weekly_throughput.mean() == 0:
@@ -569,17 +560,36 @@ class ChartGenerator:
 
         if good_weeks.empty or bad_weeks.empty: return None
 
-        good_week_sim_results = ChartGenerator._run_when_simulation(items_to_complete, weekly_throughput, normalized_weights, good_weeks)
-        bad_week_sim_results = ChartGenerator._run_when_simulation(items_to_complete, weekly_throughput, normalized_weights, bad_weeks)
-
-        if not good_week_sim_results or not bad_week_sim_results: return None
+        # Run Good Week Scenario
+        good_completion_weeks = []
+        for _ in range(Config.FORECASTING_SIMULATIONS):
+            items_done = 0
+            weeks_elapsed = 0
+            items_done += np.random.choice(good_weeks)
+            weeks_elapsed += 1
+            while items_done < items_to_complete:
+                items_done += np.random.choice(weekly_throughput, p=normalized_weights)
+                weeks_elapsed += 1
+            good_completion_weeks.append(weeks_elapsed)
+        
+        # Run Bad Week Scenario
+        bad_completion_weeks = []
+        for _ in range(Config.FORECASTING_SIMULATIONS):
+            items_done = 0
+            weeks_elapsed = 0
+            items_done += np.random.choice(bad_weeks)
+            weeks_elapsed += 1
+            while items_done < items_to_complete:
+                items_done += np.random.choice(weekly_throughput, p=normalized_weights)
+                weeks_elapsed += 1
+            bad_completion_weeks.append(weeks_elapsed)
 
         scenario_results = {'good_week': {}, 'bad_week': {}, 'median': median_throughput}
         for p in Config.PERCENTILES:
-            good_days = np.percentile([w * 7 for w in good_week_sim_results], p)
+            good_days = np.percentile([w * 7 for w in good_completion_weeks], p)
             scenario_results['good_week'][p] = start_date + timedelta(days=int(good_days))
             
-            bad_days = np.percentile([w * 7 for w in bad_week_sim_results], p)
+            bad_days = np.percentile([w * 7 for w in bad_completion_weeks], p)
             scenario_results['bad_week'][p] = start_date + timedelta(days=int(bad_days))
             
         return scenario_results
