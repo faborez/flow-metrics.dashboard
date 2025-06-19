@@ -1,0 +1,17 @@
+   # Ignore Python cache files
+__pycache__/
+*.pyc
+ 
+# Ignore virtual environment folders
+venv/
+.venv/
+env/
+ 
+# Ignore data files - your app expects users to upload data
+*.csv
+*.xlsx
+ 
+# Ignore system and editor files
+.DS_Store
+.vscode/
+.idea/
