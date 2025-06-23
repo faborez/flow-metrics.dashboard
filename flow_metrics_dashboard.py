@@ -154,6 +154,7 @@ class DataProcessor:
 class ChartGenerator:
     """Generates Plotly charts for the dashboard."""
     @staticmethod
+    @st.cache_data
     def create_cycle_time_chart(df: DataFrame, percentile_settings: Dict[str, bool]) -> Optional[Figure]:
         """Creates the cycle time scatterplot."""
         completed_df = df.dropna(subset=['Start date', 'Completed date', 'Cycle time'])
@@ -182,6 +183,7 @@ class ChartGenerator:
         return fig
 
     @staticmethod
+    @st.cache_data
     def create_cycle_time_histogram(df: DataFrame, percentile_settings: Dict[str, bool]) -> Optional[Figure]:
         """Creates a histogram of cycle time distribution."""
         completed_df = df.dropna(subset=['Cycle time'])
@@ -207,6 +209,7 @@ class ChartGenerator:
         return fig
     
     @staticmethod
+    @st.cache_data
     def create_time_in_status_chart(df: DataFrame, status_cols: List[str]) -> Tuple[Optional[Figure], Optional[DataFrame]]:
         """Calculates and creates a bar chart of the average time spent in each status."""
         
@@ -340,6 +343,7 @@ class ChartGenerator:
         ))
     
     @staticmethod
+    @st.cache_data
     def create_wip_chart(df: DataFrame, date_range: str, custom_start_date: Optional[datetime], custom_end_date: Optional[datetime]) -> Optional[Figure]:
         """Creates the WIP (Work In Progress) run chart."""
         if df is None: return None
@@ -381,6 +385,7 @@ class ChartGenerator:
         return fig
 
     @staticmethod
+    @st.cache_data
     def create_throughput_chart(df: DataFrame, interval: str, throughput_status_col: str, date_range: str, custom_start_date: Optional[datetime], custom_end_date: Optional[datetime], sprint_anchor_date: Optional[datetime.date] = None) -> Optional[Figure]:
         """Creates the throughput bar chart."""
         if not throughput_status_col:
@@ -459,6 +464,7 @@ class ChartGenerator:
         return fig
     
     @staticmethod
+    @st.cache_data
     def _get_recent_weekly_throughput(df: DataFrame, status_col: str) -> Tuple[Optional[pd.Series], Optional[np.ndarray]]:
         """Gets recent weekly throughput and calculates sampling weights."""
         if not status_col:
@@ -495,6 +501,7 @@ class ChartGenerator:
         return weekly_throughput, normalized_weights
 
     @staticmethod
+    @st.cache_data
     def create_how_many_forecast_chart(df: DataFrame, forecast_days: int, throughput_status_col: str) -> Optional[Figure]:
         """Prepares data and runs the 'How Many' simulation to create a forecast chart."""
         weekly_throughput, normalized_weights = ChartGenerator._get_recent_weekly_throughput(df, throughput_status_col)
@@ -540,6 +547,7 @@ class ChartGenerator:
         return fig
 
     @staticmethod
+    @st.cache_data
     def create_when_forecast_chart(df: DataFrame, items_to_complete: int, start_date: datetime.date, throughput_status_col: str) -> Tuple[Optional[Figure], Optional[Dict[int, datetime]]]:
         """Creates the 'When' forecast chart by running a direct simulation."""
         weekly_throughput, normalized_weights = ChartGenerator._get_recent_weekly_throughput(df, throughput_status_col)
@@ -588,6 +596,7 @@ class ChartGenerator:
         return fig, percentile_dates
 
     @staticmethod
+    @st.cache_data
     def run_when_scenario_forecast(df: DataFrame, items_to_complete: int, start_date: datetime.date, throughput_status_col: str) -> Optional[Dict]:
         """Runs the good week/bad week scenario analysis and returns the results."""
         weekly_throughput, normalized_weights = ChartGenerator._get_recent_weekly_throughput(df, throughput_status_col)
@@ -712,27 +721,6 @@ class Dashboard:
 
         self._display_sidebar(date_bounds_df)
         
-        start_col = self.selections.get("start_col")
-        completed_col = self.selections.get("completed_col")
-        
-        self.processed_df = None
-        self.filtered_df = None
-
-        if start_col and completed_col and start_col != "None" and completed_col != "None":
-            is_valid, error_msg = StatusManager.validate_status_order(self.raw_df, start_col, completed_col)
-            if is_valid:
-                with st.spinner("🔄 Processing with selected statuses..."):
-                    self.processed_df = DataProcessor.process_dates(self.raw_df, start_col, completed_col)
-                if self.processed_df is not None:
-                    self.filtered_df = self._apply_all_filters(self.processed_df, apply_date_filter=True)
-            else:
-                st.sidebar.error(error_msg)
-        
-        self._display_initial_info()
-        
-        if self.filtered_df is not None:
-            self._display_header_and_metrics()
-        
         self._display_charts()
 
     def _pre_process_for_sidebar(self) -> DataFrame:
@@ -809,21 +797,6 @@ class Dashboard:
 
     def _sidebar_chart_controls(self):
         """Controls for customizing individual charts."""
-        with st.sidebar.expander("📈 Cycle Time Charts", expanded=True):
-            status_options = ["None"] + list(self.status_mapping.keys())
-            self.selections["start_status"] = st.sidebar.selectbox(
-                "Starting Status",
-                status_options,
-                help="Select when work starts. This defines the start of Cycle Time."
-            )
-            self.selections["completed_status"] = st.sidebar.selectbox(
-                "Done Status",
-                status_options,
-                help="Select when work is completed. This defines the end of Cycle Time."
-            )
-            self.selections["start_col"] = self.status_mapping.get(self.selections["start_status"])
-            self.selections["completed_col"] = self.status_mapping.get(self.selections["completed_status"])
-        
         with st.sidebar.expander("📈 Cycle Time & Age Percentiles"):
             show_percentiles = st.checkbox("Show Percentile Lines", value=True)
             self.selections["percentiles"] = {f"show_{p}th": show_percentiles for p in Config.PERCENTILES}
@@ -861,14 +834,9 @@ class Dashboard:
         
         return df
 
-    def _display_initial_info(self):
-        """Displays information that is available immediately after file upload."""
-        st.success(f"✅ Processed {len(self.raw_df)} work items with {len(self.status_mapping)} status columns.")
-
-    def _display_header_and_metrics(self):
+    def _display_header_and_metrics(self, stats: Dict):
         """Displays metrics and filters that depend on a configured cycle time."""
-        st.info(f"📊 **Status Configuration:** Starting: **{self.selections['start_status']}** | Done: **{self.selections['completed_status']}**")
-        stats = StatsCalculator.summary_stats(self.filtered_df)
+        st.info(f"📊 **Cycle Time Configuration:** Starting: **{self.selections['start_status']}** | Done: **{self.selections['completed_status']}**")
         c1, c2, c3 = st.columns(3)
         c1.metric("📊 Total Items in Filter", stats['total']); c2.metric("✅ Completed in Filter", stats['completed']); c3.metric("🔄 In Progress in Filter", stats['in_progress'])
         st.info("ℹ️ **Cycle Time Formula:** (Done Date - Starting Date) + 1 days")
@@ -886,27 +854,48 @@ class Dashboard:
         """Displays the main chart area with tabs."""
         main_tabs = st.tabs(["📈 Cycle Time", "📊 Work Item Age", "🔄 WIP Trend", "📊 Throughput", "🔮 Throughput Forecast"])
         
-        cycle_stats = None
-        if self.filtered_df is not None:
-            cycle_stats = StatsCalculator.cycle_time_stats(self.filtered_df)
-
-        with main_tabs[0]: self._display_cycle_time_charts(cycle_stats)
-        with main_tabs[1]: self._display_work_item_age_chart(cycle_stats)
+        with main_tabs[0]: self._display_cycle_time_charts()
+        with main_tabs[1]: self._display_work_item_age_chart()
         with main_tabs[2]: self._display_wip_chart()
         with main_tabs[3]: self._display_throughput_chart()
         with main_tabs[4]: self._display_forecast_charts()
 
-    def _display_cycle_time_charts(self, cycle_stats):
+    def _display_cycle_time_charts(self):
         """Displays the Cycle Time charts and statistics."""
         st.header("Cycle Time Analysis")
         
-        if self.filtered_df is None or cycle_stats is None:
-            st.info("ℹ️ Please select a 'Starting Status' and 'Done Status' from the Chart-Specific Controls in the sidebar to generate Cycle Time charts.")
+        status_options = ["None"] + list(self.status_mapping.keys())
+        col1, col2 = st.columns(2)
+
+        with col1:
+            self.selections["start_status"] = st.selectbox("Starting Status", status_options, key="cycle_time_start")
+        with col2:
+            self.selections["completed_status"] = st.selectbox("Done Status", status_options, key="cycle_time_end")
+        
+        self.selections["start_col"] = self.status_mapping.get(self.selections["start_status"])
+        self.selections["completed_col"] = self.status_mapping.get(self.selections["completed_status"])
+        
+        st.divider()
+
+        if not self.selections["start_col"] or not self.selections["completed_col"]:
+            st.info("ℹ️ Please select a 'Starting Status' and 'Done Status' above to generate Cycle Time charts.")
             return
 
-        st.markdown("Cycle time measures the total time from when work starts until it's completed.")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Average", f"{cycle_stats['average']} days"); c2.metric("Median (50th %ile)", f"{cycle_stats['median']} days"); c3.metric("85th Percentile", f"{cycle_stats['p85']} days"); c4.metric("95th Percentile", f"{cycle_stats['p95']} days")
+        is_valid, error_msg = StatusManager.validate_status_order(self.raw_df, self.selections["start_col"], self.selections["completed_col"])
+        if not is_valid:
+            st.error(error_msg)
+            return
+
+        self.processed_df = DataProcessor.process_dates(self.raw_df, self.selections["start_col"], self.selections["completed_col"])
+        self.filtered_df = self._apply_all_filters(self.processed_df, apply_date_filter=True)
+        cycle_stats = StatsCalculator.cycle_time_stats(self.filtered_df)
+        summary_stats = StatsCalculator.summary_stats(self.filtered_df)
+
+        if self.filtered_df is None or cycle_stats is None:
+             st.warning("Could not calculate Cycle Time with the selected statuses. Please check your selections.")
+             return
+
+        self._display_header_and_metrics(summary_stats)
         
         ct_tabs = st.tabs(["Scatter Plot", "Distribution (Histogram)", "Time in Status"])
         with ct_tabs[0]:
@@ -937,7 +926,7 @@ class Dashboard:
             else: 
                 st.warning("⚠️ Not enough data to calculate time in status.")
 
-    def _display_work_item_age_chart(self, cycle_stats):
+    def _display_work_item_age_chart(self):
         """Displays the Work Item Age chart and its controls."""
         st.header("Work Item Age Analysis")
         st.markdown("This chart shows how old your current 'in progress' items are. Use the controls below to define the statuses on the x-axis.")
@@ -946,19 +935,9 @@ class Dashboard:
         col1, col2 = st.columns(2)
 
         with col1:
-            self.selections["age_start_status"] = st.selectbox(
-                "Start Status (for Age calculation)",
-                status_options,
-                help="Select the status to start aging from.",
-                key="age_start"
-            )
+            self.selections["age_start_status"] = st.selectbox("Start Status (for Age calculation)", status_options, key="age_start")
         with col2:
-            self.selections["age_done_status"] = st.selectbox(
-                "End Status",
-                status_options,
-                help="Select the last status to show on the chart's x-axis.",
-                key="age_end"
-            )
+            self.selections["age_done_status"] = st.selectbox("End Status", status_options, key="age_end")
 
         self.selections["age_start_col"] = self.status_mapping.get(self.selections["age_start_status"])
         self.selections["age_done_col"] = self.status_mapping.get(self.selections["age_done_status"])
@@ -969,15 +948,15 @@ class Dashboard:
             st.info("ℹ️ Please select a Start and End Status above to generate the chart.")
             return
 
-        # Process dates for this specific chart
         age_processed_df = DataProcessor.process_dates(self.raw_df, self.selections["age_start_col"], self.selections["age_done_col"])
         
         if age_processed_df is None:
             st.error("Could not process dates for the selected aging statuses.")
             return
-
+        
+        cycle_stats = StatsCalculator.cycle_time_stats(self.filtered_df) if self.filtered_df is not None else None
         if cycle_stats is None:
-            st.warning("Cycle Time stats needed for percentile lines. Please select main Start/Done statuses in the sidebar.")
+            st.warning("Cycle Time stats from the first tab are needed for percentile lines. Please select Start/Done statuses on the 'Cycle Time' tab.")
         
         age_df_source = self._apply_all_filters(age_processed_df, apply_date_filter=False)
         chart = ChartGenerator.create_work_item_age_chart(
