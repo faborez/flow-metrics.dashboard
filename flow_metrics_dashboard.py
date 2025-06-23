@@ -57,7 +57,7 @@ class ChartConfig:
     WIP_CHART_HOVER = "<b>Date:</b> %{x|%d/%m/%Y}<br><b>WIP count:</b> %{y}<br><b>Breakdown:</b><br>%{customdata[0]}<extra></extra>"
     THROUGHPUT_CHART_HOVER = (
         "<b>Period ending = %{customdata[0]}</b><br>"
-        "Throughput = %{y} items<br>%{customdata[1]}<extra></extra>"
+        "Throughput = %{y} items<br><b>Breakdown:</b><br>%{customdata[1]}<extra></extra>"
     )
     TREND_LINE_HOVER = "<b>Trend Line</b><br>Date = %{x|%d/%m/%Y}<br>Trend value = %{y:.1f}<extra></extra>"
 
@@ -154,6 +154,7 @@ class DataProcessor:
 class ChartGenerator:
     """Generates Plotly charts for the dashboard."""
     @staticmethod
+    @st.cache_data
     def create_cycle_time_chart(df: DataFrame, percentile_settings: Dict[str, bool]) -> Optional[Figure]:
         """Creates the cycle time scatterplot."""
         completed_df = df.dropna(subset=['Start date', 'Completed date', 'Cycle time'])
@@ -182,6 +183,7 @@ class ChartGenerator:
         return fig
 
     @staticmethod
+    @st.cache_data
     def create_cycle_time_histogram(df: DataFrame, percentile_settings: Dict[str, bool]) -> Optional[Figure]:
         """Creates a histogram of cycle time distribution."""
         completed_df = df.dropna(subset=['Cycle time'])
@@ -207,6 +209,7 @@ class ChartGenerator:
         return fig
     
     @staticmethod
+    @st.cache_data
     def create_time_in_status_chart(df: DataFrame, status_cols: List[str]) -> Tuple[Optional[Figure], Optional[DataFrame]]:
         """Calculates and creates a bar chart of the average time spent in each status."""
         
@@ -258,6 +261,7 @@ class ChartGenerator:
         return fig, chart_df
 
     @staticmethod
+    @st.cache_data
     def create_work_item_age_chart(df: DataFrame, axis_start_col: str, axis_done_col: str, cycle_time_percentiles: Dict[str, int], percentile_settings: Dict[str, bool]) -> Optional[Figure]:
         """Creates the work item age chart."""
         df_in_progress = df[df['Completed date'].isna()].copy()
@@ -340,6 +344,7 @@ class ChartGenerator:
         ))
     
     @staticmethod
+    @st.cache_data
     def create_wip_chart(df: DataFrame, date_range: str, custom_start_date: Optional[datetime], custom_end_date: Optional[datetime]) -> Optional[Figure]:
         """Creates the WIP (Work In Progress) run chart."""
         if df is None: return None
@@ -350,7 +355,6 @@ class ChartGenerator:
         daily_wip_data = []
         plot_min_date = wip_df['Start date'].min()
         
-        # --- CORRECTED: Determine the correct end date for the plot ---
         if wip_df['Completed date'].isna().any():
             plot_max_date = datetime.now()
         else:
@@ -382,6 +386,7 @@ class ChartGenerator:
         return fig
 
     @staticmethod
+    @st.cache_data
     def create_throughput_chart(df: DataFrame, interval: str, throughput_status_col: str, date_range: str, custom_start_date: Optional[datetime], custom_end_date: Optional[datetime], sprint_anchor_date: Optional[datetime.date] = None) -> Optional[Figure]:
         """Creates the throughput bar chart."""
         if not throughput_status_col:
@@ -729,6 +734,8 @@ class Dashboard:
             else:
                 st.sidebar.error(error_msg)
         
+        self._display_initial_info()
+        
         if self.filtered_df is not None:
             self._display_header_and_metrics()
         
@@ -856,15 +863,37 @@ class Dashboard:
 
         if apply_date_filter:
             if self.processed_df is not None:
-                df = _apply_date_filter(df, 'Completed date', self.selections["date_range"], self.selections["custom_start_date"], self.selections["custom_end_date"])
+                df = self._apply_date_filter(df, 'Completed date', self.selections["date_range"], self.selections["custom_start_date"], self.selections["custom_end_date"])
         
         return df
 
-    def _display_header_and_metrics(self):
-        """Displays the main header, information boxes, and summary metrics."""
+    def _apply_date_filter(self, df: pd.DataFrame, date_col_name: str, date_range: str, custom_start_date, custom_end_date) -> pd.DataFrame:
+        """Filters a DataFrame based on a date column and a selected date range string."""
+        if date_range == "All time" or pd.to_datetime(df[date_col_name], errors='coerce').isna().all():
+            return df
+        
+        today = pd.to_datetime(datetime.now().date())
+        if date_range == "Last 30 days":
+            cutoff = today - pd.DateOffset(days=30)
+            return df[(df[date_col_name] >= cutoff) & (df[date_col_name] <= today)]
+        elif date_range == "Last 60 days":
+            cutoff = today - pd.DateOffset(days=60)
+            return df[(df[date_col_name] >= cutoff) & (df[date_col_name] <= today)]
+        elif date_range == "Last 90 days":
+            cutoff = today - pd.DateOffset(days=90)
+            return df[(df[date_col_name] >= cutoff) & (df[date_col_name] <= today)]
+        elif date_range == "Custom" and custom_start_date and custom_end_date:
+            start_date = pd.to_datetime(custom_start_date)
+            end_date = pd.to_datetime(custom_end_date)
+            return df[(df[date_col_name] >= start_date) & (df[date_col_name] <= end_date)]
+        return df
+
+    def _display_initial_info(self):
+        """Displays information that is available immediately after file upload."""
         st.success(f"✅ Processed {len(self.raw_df)} work items with {len(self.status_mapping)} status columns.")
-        with st.expander("📋 Available Statuses", expanded=False):
-            st.write(", ".join(self.status_mapping.keys()))
+
+    def _display_header_and_metrics(self):
+        """Displays metrics and filters that depend on a configured cycle time."""
         st.info(f"📊 **Status Configuration:** Starting: **{self.selections['start_status']}** | Done: **{self.selections['completed_status']}**")
         stats = StatsCalculator.summary_stats(self.filtered_df)
         c1, c2, c3 = st.columns(3)
@@ -986,11 +1015,13 @@ class Dashboard:
     def _display_wip_chart(self):
         """Displays the WIP chart."""
         st.header("Work In Progress (WIP) Trend")
-        if self.filtered_df is None:
+        if self.processed_df is None:
             st.info("ℹ️ Please select a 'Starting Status' and 'Done Status' from the Chart-Specific Controls in the sidebar to generate the WIP chart.")
             return
 
-        chart = ChartGenerator.create_wip_chart(self.filtered_df, self.selections['date_range'], self.selections['custom_start_date'], self.selections['custom_end_date'])
+        # Pass the processed_df with non-date filters applied to get an accurate WIP count
+        source_df = self._apply_all_filters(self.processed_df, apply_date_filter=False)
+        chart = ChartGenerator.create_wip_chart(source_df, self.selections['date_range'], self.selections['custom_start_date'], self.selections['custom_end_date'])
         if chart: st.plotly_chart(chart, use_container_width=True)
         else: st.warning("⚠️ No items with start dates for WIP chart.")
 
