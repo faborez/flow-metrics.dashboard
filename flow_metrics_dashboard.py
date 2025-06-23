@@ -349,7 +349,12 @@ class ChartGenerator:
 
         daily_wip_data = []
         plot_min_date = wip_df['Start date'].min()
-        plot_max_date = datetime.now()
+        
+        # --- CORRECTED: Determine the correct end date for the plot ---
+        if wip_df['Completed date'].isna().any():
+            plot_max_date = datetime.now()
+        else:
+            plot_max_date = wip_df['Completed date'].max()
         
         all_dates = pd.date_range(start=plot_min_date, end=plot_max_date, freq='D')
         
@@ -440,8 +445,8 @@ class ChartGenerator:
         agg_df['Details'] = "<b>Breakdown:</b><br>" + agg_df['Details']
         
         title_interval = interval.replace("ly", "")
-        # Use Period for the x-axis for monthly grouping, Period End for others
-        x_axis_col = 'Period End' if interval != 'Monthly' else 'Period'
+        
+        x_axis_col = 'Period' if interval == 'Monthly' else 'Period End'
 
         fig = px.bar(agg_df, x=x_axis_col, y="Throughput", title=f"Throughput per {title_interval}", text="Throughput")
         fig.update_traces(
@@ -1144,44 +1149,36 @@ class Dashboard:
 def display_welcome_message():
     """Displays the initial welcome message and instructions."""
     st.markdown("### 👋 Welcome to the Flow Metrics Dashboard!")
+    
+    def _create_inline_link_with_logo(text: str, logo_path: str, url: str) -> str:
+        """Creates a markdown-compatible HTML string for a link with an inline logo."""
+        try:
+            with open(logo_path, "rb") as f:
+                logo_b64 = base64.b64encode(f.read()).decode()
+            return (
+                f'<a href="{url}" target="_blank" style="text-decoration: none; color: inherit; font-weight: bold;">'
+                f'<img src="data:image/png;base64,{logo_b64}" style="height: 1.1em; vertical-align: -0.2em; margin-right: 5px;">'
+                f'{text}</a>'
+            )
+        except FileNotFoundError:
+            return f'<a href="{url}" target="_blank">**{text}**</a>'
+            
+    pro_url = "https://marketplace.atlassian.com/apps/1221826/status-time-reports-time-in-status"
+    pro_link = _create_inline_link_with_logo("Status Time Reports", "Status time pro icon.png", pro_url)
+    
+    free_url = "https://marketplace.atlassian.com/apps/1222051/status-time-reports-free-time-in-status?hosting=cloud&tab=overview"
+    free_link = _create_inline_link_with_logo("Status Time Reports Free", "Status time free icon.png", free_url)
+
+    st.markdown(f"A dynamic set of flow metrics charts and forecasting built to analyze data exported from the Jira plugins {pro_link} & {free_link}.", unsafe_allow_html=True)
+
     with st.expander("How to export your data from Jira", expanded=True):
         st.markdown("""
-        This dashboard is built to analyze data exported from the Jira plugins **Status Time Reports** & **Status Time Reports Free**.
-        
         #### Export Settings
         1. In the plugin, select the projects, filters and statuses you want to analyze.
         2. In the export options, you **must** select **'Show entry dates'** from the Report List dropdown. This is what creates the `-> Status` columns that this dashboard needs to calculate flow metrics.
         3. It is recommended to **exclude** the 'Summary' or 'Title' field. These fields are not used and can slow down the upload.
         4. 🚨 **Important:** Do not include any columns that contain Personally Identifiable Information (PII) or other sensitive data in your export.
-        
-        ---
-        **Link to plugins:**
         """)
-
-        # Read and encode logos
-        try:
-            with open("Status time pro icon.png", "rb") as f:
-                pro_logo_b64 = base64.b64encode(f.read()).decode()
-            st.markdown(f"""
-                <a href="https://marketplace.atlassian.com/apps/1221826/status-time-reports-time-in-status" target="_blank" style="text-decoration: none; color: inherit;">
-                    <img src="data:image/png;base64,{pro_logo_b64}" style="height: 1.2em; vertical-align: middle; margin-right: 8px;">
-                    Status Time Reports
-                </a>
-            """, unsafe_allow_html=True)
-        except FileNotFoundError:
-            st.markdown("- [Status Time Reports](https://marketplace.atlassian.com/apps/1221826/status-time-reports-time-in-status)")
-
-        try:
-            with open("Status time free icon.png", "rb") as f:
-                free_logo_b64 = base64.b64encode(f.read()).decode()
-            st.markdown(f"""
-                <a href="https://marketplace.atlassian.com/apps/1222051/status-time-reports-free-time-in-status?hosting=cloud&tab=overview" target="_blank" style="text-decoration: none; color: inherit;">
-                    <img src="data:image/png;base64,{free_logo_b64}" style="height: 1.2em; vertical-align: middle; margin-right: 8px;">
-                    Status Time Reports Free
-                </a>
-            """, unsafe_allow_html=True)
-        except FileNotFoundError:
-            st.markdown("- [Status Time Reports Free](https://marketplace.atlassian.com/apps/1222051/status-time-reports-free-time-in-status?hosting=cloud&tab=overview)")
 
     st.header("🔒 Data Security & Privacy")
     st.success(
