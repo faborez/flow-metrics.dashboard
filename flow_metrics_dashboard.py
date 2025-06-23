@@ -398,6 +398,112 @@ class ChartGenerator:
         return fig
 
     @staticmethod
+    def create_how_many_forecast_chart(df: DataFrame, forecast_days: int, throughput_status_col: str) -> Optional[Figure]:
+        """
+        Runs a 'How Many' Monte Carlo simulation based on recent, weighted WEEKLY 
+        throughput and creates a forecast chart.
+        """
+        if not throughput_status_col: return None
+
+        forecast_df = df.copy()
+        forecast_df['Forecast Completion Date'] = pd.to_datetime(forecast_df[throughput_status_col].apply(DataProcessor._extract_earliest_date), errors='coerce')
+        completed_df = forecast_df.dropna(subset=['Forecast Completion Date'])
+
+        if len(completed_df) < 2: return None
+
+        last_completion_date = completed_df['Forecast Completion Date'].max()
+        start_of_period = last_completion_date - pd.DateOffset(weeks=25)
+        recent_completed_df = completed_df[completed_df['Forecast Completion Date'] > start_of_period]
+
+        if recent_completed_df.empty:
+            st.warning("Not enough recent data for forecasting. Need completed items from the last 25 weeks.")
+            return None
+            
+        weekly_throughput = recent_completed_df.groupby(pd.Grouper(key='Forecast Completion Date', freq='W-MON')).size()
+        
+        num_weeks_of_data = len(weekly_throughput)
+        if num_weeks_of_data < 2:
+            st.warning("Not enough weekly throughput samples in the last 25 weeks to forecast.")
+            return None
+        
+        if num_weeks_of_data < 7:
+            st.warning(f"Forecast is based on only {num_weeks_of_data} weeks of data. For a more reliable forecast, more historical data is recommended.")
+
+        weights = np.arange(1, num_weeks_of_data + 1)
+        normalized_weights = weights / np.sum(weights)
+
+        num_weeks = forecast_days / 7.0
+        
+        with st.spinner(f"Running {Config.FORECASTING_SIMULATIONS} weighted simulations..."):
+            forecast_counts = ChartGenerator._run_how_many_simulation(
+                tuple(weekly_throughput), tuple(normalized_weights), forecast_days
+            )
+
+        counts, bin_edges = np.histogram(forecast_counts, bins=30, range=(forecast_counts.min(), forecast_counts.max()))
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+        fig = go.Figure(data=[go.Bar(x=bin_centers, y=counts, name='Simulations')])
+        fig.update_layout(
+            title=f"Forecast: How Many Items in the Next {forecast_days} Days?",
+            xaxis_title="Number of Items Completed", yaxis_title="Frequency",
+            bargap=0.1, yaxis_range=[0, counts.max() * 1.20]
+        )
+
+        summary_text = f"**Forecast Summary (for next {forecast_days} days):**"
+        
+        for likelihood, percentile in sorted(Config.FORECAST_LIKELIHOODS.items(), reverse=True):
+            value = np.percentile(forecast_counts, percentile)
+            color = Config.PERCENTILE_COLORS.get(likelihood)
+            fig.add_vline(
+                x=value, line_dash="dash", line_color=color,
+                annotation_text=f"{likelihood}%: {int(value)}",
+                annotation_position="top left"
+            )
+            summary_text += f"\n- There is a **{likelihood}% chance** to complete **{int(value)} or more** items."
+        
+        st.markdown(summary_text)
+        return fig
+
+    @staticmethod
+    @st.cache_data
+    def _run_how_many_simulation(weekly_throughput: tuple, normalized_weights: tuple, forecast_days: int) -> np.ndarray:
+        """Cached function to run the core 'how many' simulation."""
+        num_weeks = forecast_days / 7.0
+        num_full_weeks = int(num_weeks)
+        fractional_week_multiplier = num_weeks % 1
+        
+        simulations = np.random.choice(weekly_throughput, size=(Config.FORECASTING_SIMULATIONS, num_full_weeks), replace=True, p=normalized_weights)
+        forecast_counts = simulations.sum(axis=1)
+
+        if fractional_week_multiplier > 0:
+            last_week_sim = np.random.choice(weekly_throughput, size=Config.FORECASTING_SIMULATIONS, replace=True, p=normalized_weights)
+            forecast_counts += (last_week_sim * fractional_week_multiplier).astype(int)
+        
+        return forecast_counts
+
+    @staticmethod
+    @st.cache_data
+    def _run_when_simulation(items_to_complete: int, _full_throughput_dataset: tuple, _weights: tuple) -> List[int]:
+        """A reusable, cached helper to run the 'when' simulation."""
+        completion_weeks_data = []
+        for _ in range(Config.FORECASTING_SIMULATIONS):
+            items_done = 0
+            weeks_elapsed = 0
+            timeout_weeks = max(300, (items_to_complete / np.mean(_full_throughput_dataset)) * 10 if np.mean(_full_throughput_dataset) > 0 else 300)
+
+            while items_done < items_to_complete:
+                if weeks_elapsed > timeout_weeks:
+                    weeks_elapsed = -1 
+                    break
+                items_done += np.random.choice(_full_throughput_dataset, p=_weights)
+                weeks_elapsed += 1
+            
+            if weeks_elapsed != -1:
+                completion_weeks_data.append(weeks_elapsed)
+        
+        return completion_weeks_data
+
+    @staticmethod
     def _get_recent_weekly_throughput(df: DataFrame, status_col: str) -> Tuple[Optional[pd.Series], Optional[np.ndarray]]:
         """Gets recent weekly throughput and calculates sampling weights."""
         if not status_col:
@@ -434,63 +540,6 @@ class ChartGenerator:
         return weekly_throughput, normalized_weights
 
     @staticmethod
-    def create_how_many_forecast_chart(df: DataFrame, forecast_days: int, throughput_status_col: str) -> Optional[Figure]:
-        """Prepares data and calls the cached simulation to create a 'How Many' forecast chart."""
-        weekly_throughput, normalized_weights = ChartGenerator._get_recent_weekly_throughput(df, throughput_status_col)
-        
-        if weekly_throughput is None:
-            return None
-
-        with st.spinner(f"Running {Config.FORECASTING_SIMULATIONS} weighted simulations..."):
-            # --- NEW AND CORRECTED LOGIC ---
-            num_weeks = forecast_days / 7.0
-            num_full_weeks = int(num_weeks)
-            fractional_week_multiplier = num_weeks % 1
-            
-            simulations = np.random.choice(
-                weekly_throughput, 
-                size=(Config.FORECASTING_SIMULATIONS, num_full_weeks), 
-                replace=True, 
-                p=normalized_weights
-            )
-            forecast_counts = simulations.sum(axis=1)
-
-            if fractional_week_multiplier > 0:
-                last_week_sim = np.random.choice(
-                    weekly_throughput, 
-                    size=Config.FORECASTING_SIMULATIONS, 
-                    replace=True, 
-                    p=normalized_weights
-                )
-                forecast_counts += (last_week_sim * fractional_week_multiplier).astype(int)
-            # --- END OF NEW LOGIC ---
-
-        counts, bin_edges = np.histogram(forecast_counts, bins=30, range=(forecast_counts.min(), forecast_counts.max()))
-        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-
-        fig = go.Figure(data=[go.Bar(x=bin_centers, y=counts, name='Simulations')])
-        fig.update_layout(
-            title=f"Forecast: How Many Items in the Next {forecast_days} Days?",
-            xaxis_title="Number of Items Completed", yaxis_title="Frequency",
-            bargap=0.1, yaxis_range=[0, counts.max() * 1.20]
-        )
-
-        summary_text = f"**Forecast Summary (for next {forecast_days} days):**"
-        
-        for likelihood, percentile in sorted(Config.FORECAST_LIKELIHOODS.items(), reverse=True):
-            value = np.percentile(forecast_counts, percentile)
-            color = Config.PERCENTILE_COLORS.get(likelihood)
-            fig.add_vline(
-                x=value, line_dash="dash", line_color=color,
-                annotation_text=f"{likelihood}%: {int(value)}",
-                annotation_position="top left"
-            )
-            summary_text += f"\n- There is a **{likelihood}% chance** to complete **{int(value)} or more** items."
-        
-        st.markdown(summary_text)
-        return fig
-
-    @staticmethod
     def create_when_forecast_chart(df: DataFrame, items_to_complete: int, start_date: datetime.date, throughput_status_col: str) -> Tuple[Optional[Figure], Optional[Dict[int, datetime]]]:
         """Creates the 'When' forecast chart by calling the cached simulation."""
         weekly_throughput, normalized_weights = ChartGenerator._get_recent_weekly_throughput(df, throughput_status_col)
@@ -499,23 +548,9 @@ class ChartGenerator:
             return None, None
 
         with st.spinner(f"Running {Config.FORECASTING_SIMULATIONS} 'when' simulations for {items_to_complete} items..."):
-            # --- NEW AND CORRECTED LOGIC ---
-            completion_weeks_data = []
-            for _ in range(Config.FORECASTING_SIMULATIONS):
-                items_done = 0
-                weeks_elapsed = 0
-                timeout_weeks = max(300, (items_to_complete / weekly_throughput.mean()) * 20)
-
-                while items_done < items_to_complete:
-                    if weeks_elapsed > timeout_weeks:
-                        weeks_elapsed = -1 
-                        break
-                    items_done += np.random.choice(weekly_throughput, p=normalized_weights)
-                    weeks_elapsed += 1
-                
-                if weeks_elapsed != -1:
-                    completion_weeks_data.append(weeks_elapsed)
-            # --- END OF NEW LOGIC ---
+            completion_weeks_data = ChartGenerator._run_when_simulation(
+                items_to_complete, tuple(weekly_throughput), tuple(normalized_weights)
+            )
 
         if not completion_weeks_data: return None, None
         
@@ -554,11 +589,10 @@ class ChartGenerator:
 
         if good_weeks.empty or bad_weeks.empty: return None
 
-        # --- NEW AND CORRECTED LOGIC ---
         # Run Good Week Scenario
         good_completion_weeks = []
         for _ in range(Config.FORECASTING_SIMULATIONS):
-            items_done = np.random.choice(good_weeks) # First week is good (uniform random from good weeks)
+            items_done = np.random.choice(good_weeks)
             weeks_elapsed = 1
             while items_done < items_to_complete:
                 items_done += np.random.choice(weekly_throughput, p=normalized_weights)
@@ -568,14 +602,13 @@ class ChartGenerator:
         # Run Bad Week Scenario
         bad_completion_weeks = []
         for _ in range(Config.FORECASTING_SIMULATIONS):
-            items_done = np.random.choice(bad_weeks) # First week is bad (uniform random from bad weeks)
+            items_done = np.random.choice(bad_weeks)
             weeks_elapsed = 1
             while items_done < items_to_complete:
                 items_done += np.random.choice(weekly_throughput, p=normalized_weights)
                 weeks_elapsed += 1
             bad_completion_weeks.append(weeks_elapsed)
-        # --- END OF NEW LOGIC ---
-
+            
         scenario_results = {'good_week': {}, 'bad_week': {}, 'median': median_throughput}
         for p in Config.PERCENTILES:
             good_days = np.percentile([w * 7 for w in good_completion_weeks], p)
@@ -935,7 +968,7 @@ class Dashboard:
             )
 
         self.selections["age_start_col"] = self.status_mapping.get(self.selections["age_start_status"])
-        self.selections["age_done_col"] = self.status_mapping.get(self.selections["age_done_status"])
+        self.selections["age_done_col"] = self.status_mapping.get(self.selections["age_done_col"])
         
         st.divider()
 
@@ -1093,34 +1126,51 @@ class Dashboard:
 def display_welcome_message():
     """Displays the initial welcome message and instructions."""
     st.markdown("### 👋 Welcome to the Flow Metrics Dashboard!")
-    st.markdown("A dynamic set of flow metrics charts and forecasting built to analyze data exported from the Jira plugins, Status Time Reports & Status Time Reports Free.")
-    st.markdown("---")
-    st.markdown("**Link to plugins:**")
+    with st.expander("How to export your data from Jira", expanded=True):
+        st.markdown("""
+        This dashboard is built to analyze data exported from the Jira plugins **Status Time Reports** & **Status Time Reports Free**.
+        
+        #### Export Settings
+        1. In the plugin, select the projects, filters and statuses you want to analyze.
+        2. In the export options, you **must** select **'Show entry dates'** from the Report List dropdown. This is what creates the `-> Status` columns that this dashboard needs to calculate flow metrics.
+        3. It is recommended to **exclude** the 'Summary' or 'Title' field. These fields are not used and can slow down the upload.
+        4. 🚨 **Important:** Do not include any columns that contain Personally Identifiable Information (PII) or other sensitive data in your export.
+        
+        ---
+        **Link to plugins:**
+        """)
 
-    # Read and encode logos
-    try:
-        with open("Status time pro icon.png", "rb") as f:
-            pro_logo_b64 = base64.b64encode(f.read()).decode()
-        st.markdown(f"""
-            <a href="https://marketplace.atlassian.com/apps/1221826/status-time-reports-time-in-status" target="_blank" style="text-decoration: none; color: inherit;">
-                <img src="data:image/png;base64,{pro_logo_b64}" style="height: 1.2em; vertical-align: middle; margin-right: 8px;">
-                Status Time Reports
-            </a>
-        """, unsafe_allow_html=True)
-    except FileNotFoundError:
-        st.markdown("- [Status Time Reports](https://marketplace.atlassian.com/apps/1221826/status-time-reports-time-in-status)")
+        # Read and encode logos
+        try:
+            with open("Status time pro icon.png", "rb") as f:
+                pro_logo_b64 = base64.b64encode(f.read()).decode()
+            st.markdown(f"""
+                <a href="https://marketplace.atlassian.com/apps/1221826/status-time-reports-time-in-status" target="_blank" style="text-decoration: none; color: inherit;">
+                    <img src="data:image/png;base64,{pro_logo_b64}" style="height: 1.2em; vertical-align: middle; margin-right: 8px;">
+                    Status Time Reports
+                </a>
+            """, unsafe_allow_html=True)
+        except FileNotFoundError:
+            st.markdown("- [Status Time Reports](https://marketplace.atlassian.com/apps/1221826/status-time-reports-time-in-status)")
 
-    try:
-        with open("Status time free icon.png", "rb") as f:
-            free_logo_b64 = base64.b64encode(f.read()).decode()
-        st.markdown(f"""
-            <a href="https://marketplace.atlassian.com/apps/1222051/status-time-reports-free-time-in-status?hosting=cloud&tab=overview" target="_blank" style="text-decoration: none; color: inherit;">
-                <img src="data:image/png;base64,{free_logo_b64}" style="height: 1.2em; vertical-align: middle; margin-right: 8px;">
-                Status Time Reports Free
-            </a>
-        """, unsafe_allow_html=True)
-    except FileNotFoundError:
-        st.markdown("- [Status Time Reports Free](https://marketplace.atlassian.com/apps/1222051/status-time-reports-free-time-in-status?hosting=cloud&tab=overview)")
+        try:
+            with open("Status time free icon.png", "rb") as f:
+                free_logo_b64 = base64.b64encode(f.read()).decode()
+            st.markdown(f"""
+                <a href="https://marketplace.atlassian.com/apps/1222051/status-time-reports-free-time-in-status?hosting=cloud&tab=overview" target="_blank" style="text-decoration: none; color: inherit;">
+                    <img src="data:image/png;base64,{free_logo_b64}" style="height: 1.2em; vertical-align: middle; margin-right: 8px;">
+                    Status Time Reports Free
+                </a>
+            """, unsafe_allow_html=True)
+        except FileNotFoundError:
+            st.markdown("- [Status Time Reports Free](https://marketplace.atlassian.com/apps/1222051/status-time-reports-free-time-in-status?hosting=cloud&tab=overview)")
+
+    st.header("🔒 Data Security & Privacy")
+    st.success(
+        "**Your data is safe.** This application processes your CSV file entirely within the browser and in memory for your session. "
+        "No data from your uploaded file is ever saved, stored, or logged on any server. When you close this browser tab, your data is permanently discarded."
+    )
+
 
 def format_multiselect_display(selection, name: str) -> str:
     """Formats a list from a multiselect for clean display."""
