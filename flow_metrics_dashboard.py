@@ -56,7 +56,7 @@ class ChartConfig:
     )
     WIP_CHART_HOVER = "<b>Date:</b> %{x|%d/%m/%Y}<br><b>WIP count:</b> %{y}<br><b>Breakdown:</b><br>%{customdata[0]}<extra></extra>"
     THROUGHPUT_CHART_HOVER = (
-        "<b>Throughput Chart</b><br>Period = %{customdata[0]}<br>"
+        "<b>Period ending = %{customdata[0]}</b><br>"
         "Throughput = %{y} items<br>%{customdata[1]}<extra></extra>"
     )
     TREND_LINE_HOVER = "<b>Trend Line</b><br>Date = %{x|%d/%m/%Y}<br>Trend value = %{y:.1f}<extra></extra>"
@@ -377,7 +377,7 @@ class ChartGenerator:
         return fig
 
     @staticmethod
-    def create_throughput_chart(df: DataFrame, interval: str, throughput_status_col: str, date_range: str, custom_start_date: Optional[datetime], custom_end_date: Optional[datetime], sprint_end_day: Optional[str] = 'MON') -> Optional[Figure]:
+    def create_throughput_chart(df: DataFrame, interval: str, throughput_status_col: str, date_range: str, custom_start_date: Optional[datetime], custom_end_date: Optional[datetime], sprint_anchor_date: Optional[datetime.date] = None) -> Optional[Figure]:
         """Creates the throughput bar chart."""
         if not throughput_status_col:
             return None
@@ -388,37 +388,69 @@ class ChartGenerator:
 
         if throughput_df.empty:
             return None
+        
+        if interval == 'Fortnightly':
+            if not sprint_anchor_date:
+                st.warning("Please select a 'Sprint End Date' to establish the fortnightly sprint cycle.")
+                return None
             
-        freq_string = ''
-        if interval == 'Weekly':
-            freq_string = 'W-MON'
-        elif interval == 'Fortnightly':
-            freq_string = f"2W-{sprint_end_day}"
-        elif interval == 'Monthly':
-            freq_string = 'MS'
+            anchor = pd.to_datetime(sprint_anchor_date)
+            
+            min_date, max_date = throughput_df['Throughput Date'].min(), throughput_df['Throughput Date'].max()
+            
+            bins = [anchor]
+            temp_date_back = anchor
+            while temp_date_back > min_date:
+                temp_date_back -= timedelta(days=14)
+                bins.insert(0, temp_date_back)
+            
+            temp_date_forward = anchor
+            while temp_date_forward < max_date:
+                temp_date_forward += timedelta(days=14)
+                bins.append(temp_date_forward)
 
-        grouper = pd.Grouper(key='Throughput Date', freq=freq_string)
+            labels = bins[1:]
+            throughput_df['Period'] = pd.cut(throughput_df['Throughput Date'], bins=bins, labels=labels, right=True, include_lowest=True)
+            
+            agg_df = throughput_df.groupby('Period').agg(
+                Throughput=('Key', 'count'),
+                Details=('Work type', lambda s: '<br>'.join(f"{wt}: {count}" for wt, count in s.value_counts().items()))
+            ).reset_index()
+            agg_df['Period End'] = pd.to_datetime(agg_df['Period'])
+
+        else: # Weekly or Monthly logic
+            freq_string = 'W-MON' if interval == 'Weekly' else 'MS'
+            grouper = pd.Grouper(key='Throughput Date', freq=freq_string)
+            agg_df = throughput_df.groupby(grouper).agg(
+                Throughput=('Key', 'count'),
+                Details=('Work type', lambda s: '<br>'.join(f"{wt}: {count}" for wt, count in s.value_counts().items()))
+            ).reset_index().rename(columns={'Throughput Date': 'Period'})
+            
+            if interval == 'Weekly':
+                agg_df['Period End'] = agg_df['Period'] + pd.DateOffset(days=6)
+            elif interval == 'Monthly':
+                agg_df['Period End'] = agg_df['Period'] + pd.offsets.MonthEnd(0)
+            else:
+                agg_df['Period End'] = agg_df['Period']
         
-        agg_df = throughput_df.groupby(grouper).agg(
-            Throughput=('Key', 'count'),
-            Details=('Work type', lambda s: '<br>'.join(f"{wt}: {count}" for wt, count in s.value_counts().items()))
-        ).reset_index().rename(columns={'Throughput Date': 'Period'})
-        
-        agg_df = _apply_date_filter(agg_df, 'Period', date_range, custom_start_date, custom_end_date)
+        agg_df = _apply_date_filter(agg_df, 'Period End', date_range, custom_start_date, custom_end_date)
         if agg_df.empty: return None
 
+        agg_df['Period_End_Formatted'] = agg_df['Period End'].dt.strftime('%d/%m/%Y')
         agg_df['Details'] = "<b>Breakdown:</b><br>" + agg_df['Details']
-        agg_df['Period_formatted'] = agg_df['Period'].dt.strftime('%d/%m/%Y')
         
         title_interval = interval.replace("ly", "")
-        fig = px.bar(agg_df, x="Period", y="Throughput", title=f"Throughput per {title_interval}", text="Throughput")
+        # Use Period for the x-axis for monthly grouping, Period End for others
+        x_axis_col = 'Period End' if interval != 'Monthly' else 'Period'
+
+        fig = px.bar(agg_df, x=x_axis_col, y="Throughput", title=f"Throughput per {title_interval}", text="Throughput")
         fig.update_traces(
             textposition='outside',
             hovertemplate=ChartConfig.THROUGHPUT_CHART_HOVER,
-            customdata=agg_df[['Period_formatted', 'Details']].values
+            customdata=agg_df[['Period_End_Formatted', 'Details']].values
         )
         if not agg_df.empty:
-            fig.update_layout(yaxis_range=[0, agg_df['Throughput'].max() * 1.15])
+            fig.update_layout(yaxis_range=[0, agg_df['Throughput'].max() * 1.15], xaxis_title="Period")
             
         return fig
     
@@ -819,29 +851,8 @@ class Dashboard:
 
         if apply_date_filter:
             if self.processed_df is not None:
-                df = self._apply_date_filter(df, 'Completed date', self.selections["date_range"], self.selections["custom_start_date"], self.selections["custom_end_date"])
+                df = _apply_date_filter(df, 'Completed date', self.selections["date_range"], self.selections["custom_start_date"], self.selections["custom_end_date"])
         
-        return df
-
-    def _apply_date_filter(self, df: pd.DataFrame, date_col_name: str, date_range: str, custom_start_date, custom_end_date) -> pd.DataFrame:
-        """Filters a DataFrame based on a date column and a selected date range string."""
-        if date_range == "All time" or pd.to_datetime(df[date_col_name], errors='coerce').isna().all():
-            return df
-        
-        today = pd.to_datetime(datetime.now().date())
-        if date_range == "Last 30 days":
-            cutoff = today - pd.DateOffset(days=30)
-            return df[df[date_col_name] >= cutoff]
-        elif date_range == "Last 60 days":
-            cutoff = today - pd.DateOffset(days=60)
-            return df[df[date_col_name] >= cutoff]
-        elif date_range == "Last 90 days":
-            cutoff = today - pd.DateOffset(days=90)
-            return df[df[date_col_name] >= cutoff]
-        elif date_range == "Custom" and custom_start_date and custom_end_date:
-            start_date = pd.to_datetime(custom_start_date)
-            end_date = pd.to_datetime(custom_end_date)
-            return df[(df[date_col_name] >= start_date) & (df[date_col_name] <= end_date)]
         return df
 
     def _display_header_and_metrics(self):
@@ -1002,15 +1013,10 @@ class Dashboard:
                 key="throughput_status_key"
             )
         
-        self.selections['sprint_end_day_code'] = 'MON' # Default
+        self.selections['sprint_anchor_date'] = None
         if self.selections["throughput_interval"] == 'Fortnightly':
             with col3:
-                days = {'Monday': 'MON', 'Tuesday': 'TUE', 'Wednesday': 'WED', 'Thursday': 'THU', 'Friday': 'FRI', 'Saturday': 'SAT', 'Sunday': 'SUN'}
-                sprint_end_day = st.selectbox(
-                    "Last day of sprint",
-                    options=list(days.keys())
-                )
-                self.selections['sprint_end_day_code'] = days.get(sprint_end_day)
+                self.selections['sprint_anchor_date'] = st.date_input("Sprint End Date", value=datetime.now(), help="Select the last day of any Sprint in your team's cadence.")
 
         self.selections['throughput_status_col'] = self.status_mapping.get(self.selections["throughput_status"])
 
@@ -1025,7 +1031,7 @@ class Dashboard:
             self.selections['date_range'],
             self.selections['custom_start_date'],
             self.selections['custom_end_date'],
-            self.selections['sprint_end_day_code']
+            sprint_anchor_date=self.selections.get('sprint_anchor_date')
         )
         if chart:
             st.plotly_chart(chart, use_container_width=True)
@@ -1066,7 +1072,6 @@ class Dashboard:
             
             st.divider()
             
-            # --- NEW: Inlined logic for calculating forecast_days ---
             range_selection = self.selections.get("forecast_range")
             if range_selection == "Next 30 days": forecast_days = 30
             elif range_selection == "Next 60 days": forecast_days = 60
@@ -1078,8 +1083,7 @@ class Dashboard:
                     forecast_days = max(1, delta)
                 else: forecast_days = 30
             else: forecast_days = 30
-            # --- END of inlined logic ---
-
+            
             chart = ChartGenerator.create_how_many_forecast_chart(forecast_source_df, forecast_days, throughput_status_col)
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("⚠️ Insufficient historical data for forecasting. Check that the selected Throughput Status has completed items.")
@@ -1193,13 +1197,13 @@ def _apply_date_filter(df: pd.DataFrame, date_col_name: str, date_range: str, cu
     today = pd.to_datetime(datetime.now().date())
     if date_range == "Last 30 days":
         cutoff = today - pd.DateOffset(days=30)
-        return df[df[date_col_name] >= cutoff]
+        return df[(df[date_col_name] >= cutoff) & (df[date_col_name] <= today)]
     elif date_range == "Last 60 days":
         cutoff = today - pd.DateOffset(days=60)
-        return df[df[date_col_name] >= cutoff]
+        return df[(df[date_col_name] >= cutoff) & (df[date_col_name] <= today)]
     elif date_range == "Last 90 days":
         cutoff = today - pd.DateOffset(days=90)
-        return df[df[date_col_name] >= cutoff]
+        return df[(df[date_col_name] >= cutoff) & (df[date_col_name] <= today)]
     elif date_range == "Custom" and custom_start_date and custom_end_date:
         start_date = pd.to_datetime(custom_start_date)
         end_date = pd.to_datetime(custom_end_date)
