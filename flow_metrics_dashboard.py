@@ -844,23 +844,6 @@ class Dashboard:
             return df[(df[date_col_name] >= start_date) & (df[date_col_name] <= end_date)]
         return df
 
-    # --- THIS FUNCTION HAS BEEN RESTORED ---
-    def _calculate_forecast_days(self) -> int:
-        """Calculates the number of days for the 'how many' forecast based on user selection."""
-        range_selection = self.selections.get("forecast_range")
-        if range_selection == "Next 30 days":
-            return 30
-        if range_selection == "Next 60 days":
-            return 60
-        if range_selection == "Next 90 days":
-            return 90
-        if range_selection == "Custom":
-            custom_date = self.selections.get("forecast_custom_date")
-            if custom_date:
-                delta = (custom_date - datetime.now().date()).days
-                return max(1, delta)
-        return 30
-
     def _display_header_and_metrics(self):
         """Displays the main header, information boxes, and summary metrics."""
         st.success(f"✅ Processed {len(self.raw_df)} work items with {len(self.status_mapping)} status columns.")
@@ -1000,7 +983,7 @@ class Dashboard:
         st.header("Throughput")
         st.markdown("Throughput measures the number of work items completed per unit of time. Use the control below to change the time unit.")
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             self.selections["throughput_interval"] = st.selectbox(
                 "Interval",
@@ -1018,6 +1001,16 @@ class Dashboard:
                 status_options,
                 key="throughput_status_key"
             )
+        
+        self.selections['sprint_end_day_code'] = 'MON' # Default
+        if self.selections["throughput_interval"] == 'Fortnightly':
+            with col3:
+                days = {'Monday': 'MON', 'Tuesday': 'TUE', 'Wednesday': 'WED', 'Thursday': 'THU', 'Friday': 'FRI', 'Saturday': 'SAT', 'Sunday': 'SUN'}
+                sprint_end_day = st.selectbox(
+                    "Last day of sprint",
+                    options=list(days.keys())
+                )
+                self.selections['sprint_end_day_code'] = days.get(sprint_end_day)
 
         self.selections['throughput_status_col'] = self.status_mapping.get(self.selections["throughput_status"])
 
@@ -1031,7 +1024,8 @@ class Dashboard:
             self.selections['throughput_status_col'],
             self.selections['date_range'],
             self.selections['custom_start_date'],
-            self.selections['custom_end_date']
+            self.selections['custom_end_date'],
+            self.selections['sprint_end_day_code']
         )
         if chart:
             st.plotly_chart(chart, use_container_width=True)
@@ -1072,7 +1066,20 @@ class Dashboard:
             
             st.divider()
             
-            forecast_days = self._calculate_forecast_days()
+            # --- NEW: Inlined logic for calculating forecast_days ---
+            range_selection = self.selections.get("forecast_range")
+            if range_selection == "Next 30 days": forecast_days = 30
+            elif range_selection == "Next 60 days": forecast_days = 60
+            elif range_selection == "Next 90 days": forecast_days = 90
+            elif range_selection == "Custom":
+                custom_date = self.selections.get("forecast_custom_date")
+                if custom_date:
+                    delta = (custom_date - datetime.now().date()).days
+                    forecast_days = max(1, delta)
+                else: forecast_days = 30
+            else: forecast_days = 30
+            # --- END of inlined logic ---
+
             chart = ChartGenerator.create_how_many_forecast_chart(forecast_source_df, forecast_days, throughput_status_col)
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("⚠️ Insufficient historical data for forecasting. Check that the selected Throughput Status has completed items.")
