@@ -54,7 +54,7 @@ class ChartConfig:
         "%{customdata[0]}<br><b>Work type:</b> %{customdata[1]}<br><b>Status:</b> %{customdata[2]}<br>"
         "<b>Start:</b> %{customdata[3]}<br><b>Age:</b> %{customdata[4]} days<extra></extra>"
     )
-    WIP_CHART_HOVER = "<b>Date:</b> %{x|%d/%m/%Y}<br><b>WIP count:</b> %{y}<extra></extra>"
+    WIP_CHART_HOVER = "<b>Date:</b> %{x|%d/%m/%Y}<br><b>WIP count:</b> %{y}<br><b>Breakdown:</b><br>%{customdata[0]}<extra></extra>"
     THROUGHPUT_CHART_HOVER = (
         "<b>Throughput Chart</b><br>Period = %{customdata[0]}<br>"
         "Throughput = %{y} items<br>%{customdata[1]}<extra></extra>"
@@ -318,12 +318,13 @@ class ChartGenerator:
             legend=dict(x=domain_end * 1.02, xanchor='left')
         )
         
-        for p_int_str, p_val in cycle_time_percentiles.items():
-            if p_int_str.startswith('p'):
-                p = int(p_int_str[1:])
-                if percentile_settings.get(f"show_{p}th", True):
-                    hover_text = f"<b>{p}th Percentile (from Cycle Time)</b><br>Value: {p_val} days<br><i>Items above this line are aging longer than {p}% of past items.</i>"
-                    ChartGenerator._add_hoverable_line(fig, p_val, status_order, hover_text, Config.PERCENTILE_COLORS.get(p), f"{p}th: {p_val}d")
+        if cycle_time_percentiles:
+            for p_int_str, p_val in cycle_time_percentiles.items():
+                if p_int_str.startswith('p'):
+                    p = int(p_int_str[1:])
+                    if percentile_settings.get(f"show_{p}th", True):
+                        hover_text = f"<b>{p}th Percentile (from Cycle Time)</b><br>Value: {p_val} days<br><i>Items above this line are aging longer than {p}% of past items.</i>"
+                        ChartGenerator._add_hoverable_line(fig, p_val, status_order, hover_text, Config.PERCENTILE_COLORS.get(p), f"{p}th: {p_val}d")
         return fig
 
     @staticmethod
@@ -339,30 +340,44 @@ class ChartGenerator:
         ))
     
     @staticmethod
-    def create_wip_chart(df: DataFrame) -> Optional[Figure]:
+    def create_wip_chart(df: DataFrame, date_range: str, custom_start_date: Optional[datetime], custom_end_date: Optional[datetime]) -> Optional[Figure]:
         """Creates the WIP (Work In Progress) run chart."""
+        if df is None: return None
         wip_df = df.dropna(subset=['Start date'])
         if wip_df.empty:
             return None
 
-        starts = wip_df[['Start date']].rename(columns={'Start date': 'Date'})
-        starts['Change'] = 1
+        daily_wip_data = []
+        plot_min_date = wip_df['Start date'].min()
+        plot_max_date = datetime.now()
         
-        ends = wip_df.dropna(subset=['Completed date'])[['Completed date']].rename(columns={'Completed date': 'Date'})
-        ends['Change'] = -1
-
-        wip_events = pd.concat([starts, ends]).sort_values(by='Date')
-        wip_over_time = wip_events.groupby(pd.Grouper(key='Date', freq='D')).sum().cumsum().reset_index()
-        wip_over_time.rename(columns={'Change': 'WIP'}, inplace=True)
+        all_dates = pd.date_range(start=plot_min_date, end=plot_max_date, freq='D')
+        
+        filtered_dates = _apply_date_filter(pd.DataFrame({'Date': all_dates}), 'Date', date_range, custom_start_date, custom_end_date)['Date']
+        
+        for day in filtered_dates:
+            daily_wip_df = wip_df[
+                (wip_df['Start date'] <= day) & 
+                ((wip_df['Completed date'].isna()) | (wip_df['Completed date'] > day))
+            ]
+            
+            breakdown_str = '<br>'.join(f"{wt}: {count}" for wt, count in daily_wip_df['Work type'].value_counts().items())
+            daily_wip_data.append({'Date': day, 'WIP': len(daily_wip_df), 'Breakdown': breakdown_str})
+        
+        if not daily_wip_data: return None
+        wip_over_time = pd.DataFrame(daily_wip_data)
         
         fig = px.line(wip_over_time, x="Date", y="WIP", title="WIP (Work In Progress) Run Chart")
-        fig.update_traces(hovertemplate=ChartConfig.WIP_CHART_HOVER)
+        fig.update_traces(
+            customdata=wip_over_time[['Breakdown']],
+            hovertemplate=ChartConfig.WIP_CHART_HOVER
+        )
         
         ChartGenerator._add_trend_line(fig, wip_over_time)
         return fig
 
     @staticmethod
-    def create_throughput_chart(df: DataFrame, interval: str, throughput_status_col: str) -> Optional[Figure]:
+    def create_throughput_chart(df: DataFrame, interval: str, throughput_status_col: str, date_range: str, custom_start_date: Optional[datetime], custom_end_date: Optional[datetime], sprint_end_day: Optional[str] = 'MON') -> Optional[Figure]:
         """Creates the throughput bar chart."""
         if not throughput_status_col:
             return None
@@ -374,14 +389,24 @@ class ChartGenerator:
         if throughput_df.empty:
             return None
             
-        period_map = {"Weekly": 'W-MON', "Fortnightly": '2W-MON', "Monthly": 'MS'}
-        grouper = pd.Grouper(key='Throughput Date', freq=period_map.get(interval, 'W-MON'))
+        freq_string = ''
+        if interval == 'Weekly':
+            freq_string = 'W-MON'
+        elif interval == 'Fortnightly':
+            freq_string = f"2W-{sprint_end_day}"
+        elif interval == 'Monthly':
+            freq_string = 'MS'
+
+        grouper = pd.Grouper(key='Throughput Date', freq=freq_string)
         
         agg_df = throughput_df.groupby(grouper).agg(
             Throughput=('Key', 'count'),
             Details=('Work type', lambda s: '<br>'.join(f"{wt}: {count}" for wt, count in s.value_counts().items()))
         ).reset_index().rename(columns={'Throughput Date': 'Period'})
         
+        agg_df = _apply_date_filter(agg_df, 'Period', date_range, custom_start_date, custom_end_date)
+        if agg_df.empty: return None
+
         agg_df['Details'] = "<b>Breakdown:</b><br>" + agg_df['Details']
         agg_df['Period_formatted'] = agg_df['Period'].dt.strftime('%d/%m/%Y')
         
@@ -396,7 +421,7 @@ class ChartGenerator:
             fig.update_layout(yaxis_range=[0, agg_df['Throughput'].max() * 1.15])
             
         return fig
-
+    
     @staticmethod
     def _get_recent_weekly_throughput(df: DataFrame, status_col: str) -> Tuple[Optional[pd.Series], Optional[np.ndarray]]:
         """Gets recent weekly throughput and calculates sampling weights."""
@@ -434,34 +459,24 @@ class ChartGenerator:
         return weekly_throughput, normalized_weights
 
     @staticmethod
-    @st.cache_data
-    def _run_how_many_simulation(weekly_throughput: tuple, normalized_weights: tuple, forecast_days: int) -> np.ndarray:
-        """Cached function to run the core 'how many' simulation."""
-        num_weeks = forecast_days / 7.0
-        num_full_weeks = int(num_weeks)
-        fractional_week_multiplier = num_weeks % 1
-        
-        simulations = np.random.choice(weekly_throughput, size=(Config.FORECASTING_SIMULATIONS, num_full_weeks), replace=True, p=normalized_weights)
-        forecast_counts = simulations.sum(axis=1)
-
-        if fractional_week_multiplier > 0:
-            last_week_sim = np.random.choice(weekly_throughput, size=Config.FORECASTING_SIMULATIONS, replace=True, p=normalized_weights)
-            forecast_counts += (last_week_sim * fractional_week_multiplier).astype(int)
-        
-        return forecast_counts
-
-    @staticmethod
     def create_how_many_forecast_chart(df: DataFrame, forecast_days: int, throughput_status_col: str) -> Optional[Figure]:
-        """Prepares data and calls the cached simulation to create a 'How Many' forecast chart."""
+        """Prepares data and runs the 'How Many' simulation to create a forecast chart."""
         weekly_throughput, normalized_weights = ChartGenerator._get_recent_weekly_throughput(df, throughput_status_col)
         
         if weekly_throughput is None:
             return None
 
         with st.spinner(f"Running {Config.FORECASTING_SIMULATIONS} weighted simulations..."):
-            forecast_counts = ChartGenerator._run_how_many_simulation(
-                tuple(weekly_throughput), tuple(normalized_weights), forecast_days
-            )
+            num_weeks = forecast_days / 7.0
+            num_full_weeks = int(num_weeks)
+            fractional_week_multiplier = num_weeks % 1
+            
+            simulations = np.random.choice(weekly_throughput, size=(Config.FORECASTING_SIMULATIONS, num_full_weeks), replace=True, p=normalized_weights)
+            forecast_counts = simulations.sum(axis=1)
+
+            if fractional_week_multiplier > 0:
+                last_week_sim = np.random.choice(weekly_throughput, size=Config.FORECASTING_SIMULATIONS, replace=True, p=normalized_weights)
+                forecast_counts += (last_week_sim * fractional_week_multiplier).astype(int)
 
         counts, bin_edges = np.histogram(forecast_counts, bins=30, range=(forecast_counts.min(), forecast_counts.max()))
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
@@ -489,39 +504,29 @@ class ChartGenerator:
         return fig
 
     @staticmethod
-    @st.cache_data
-    def _run_when_simulation(items_to_complete: int, _full_throughput_dataset: tuple, _weights: tuple) -> List[int]:
-        """A reusable, cached helper to run the 'when' simulation."""
-        completion_weeks_data = []
-        for _ in range(Config.FORECASTING_SIMULATIONS):
-            items_done = 0
-            weeks_elapsed = 0
-            timeout_weeks = max(300, (items_to_complete / np.mean(_full_throughput_dataset)) * 10 if np.mean(_full_throughput_dataset) > 0 else 300)
-
-            while items_done < items_to_complete:
-                if weeks_elapsed > timeout_weeks:
-                    weeks_elapsed = -1 
-                    break
-                items_done += np.random.choice(_full_throughput_dataset, p=_weights)
-                weeks_elapsed += 1
-            
-            if weeks_elapsed != -1:
-                completion_weeks_data.append(weeks_elapsed)
-        
-        return completion_weeks_data
-
-    @staticmethod
     def create_when_forecast_chart(df: DataFrame, items_to_complete: int, start_date: datetime.date, throughput_status_col: str) -> Tuple[Optional[Figure], Optional[Dict[int, datetime]]]:
-        """Creates the 'When' forecast chart by calling the cached simulation."""
+        """Creates the 'When' forecast chart by running a direct simulation."""
         weekly_throughput, normalized_weights = ChartGenerator._get_recent_weekly_throughput(df, throughput_status_col)
 
-        if weekly_throughput is None or weekly_throughput.mean() == 0:
+        if weekly_throughput is None or normalized_weights is None or weekly_throughput.mean() == 0:
             return None, None
 
         with st.spinner(f"Running {Config.FORECASTING_SIMULATIONS} 'when' simulations for {items_to_complete} items..."):
-            completion_weeks_data = ChartGenerator._run_when_simulation(
-                items_to_complete, tuple(weekly_throughput), tuple(normalized_weights)
-            )
+            completion_weeks_data = []
+            for _ in range(Config.FORECASTING_SIMULATIONS):
+                items_done = 0
+                weeks_elapsed = 0
+                timeout_weeks = max(300, (items_to_complete / weekly_throughput.mean()) * 20 if weekly_throughput.mean() > 0 else 300)
+
+                while items_done < items_to_complete:
+                    if weeks_elapsed > timeout_weeks:
+                        weeks_elapsed = -1 
+                        break
+                    items_done += np.random.choice(weekly_throughput, p=normalized_weights)
+                    weeks_elapsed += 1
+                
+                if weeks_elapsed != -1:
+                    completion_weeks_data.append(weeks_elapsed)
 
         if not completion_weeks_data: return None, None
         
@@ -560,30 +565,20 @@ class ChartGenerator:
 
         if good_weeks.empty or bad_weeks.empty: return None
 
-        # Run Good Week Scenario
         good_completion_weeks = []
         for _ in range(Config.FORECASTING_SIMULATIONS):
-            items_done = 0
-            weeks_elapsed = 0
-            # Sample first week from only good weeks (uniform)
-            items_done += np.random.choice(good_weeks)
-            weeks_elapsed += 1
+            items_done = np.random.choice(good_weeks)
+            weeks_elapsed = 1
             while items_done < items_to_complete:
-                # Subsequent weeks use the full, weighted dataset
                 items_done += np.random.choice(weekly_throughput, p=normalized_weights)
                 weeks_elapsed += 1
             good_completion_weeks.append(weeks_elapsed)
         
-        # Run Bad Week Scenario
         bad_completion_weeks = []
         for _ in range(Config.FORECASTING_SIMULATIONS):
-            items_done = 0
-            weeks_elapsed = 0
-            # Sample first week from only bad weeks (uniform)
-            items_done += np.random.choice(bad_weeks)
-            weeks_elapsed += 1
+            items_done = np.random.choice(bad_weeks)
+            weeks_elapsed = 1
             while items_done < items_to_complete:
-                # Subsequent weeks use the full, weighted dataset
                 items_done += np.random.choice(weekly_throughput, p=normalized_weights)
                 weeks_elapsed += 1
             bad_completion_weeks.append(weeks_elapsed)
@@ -684,24 +679,22 @@ class Dashboard:
         start_col = self.selections.get("start_col")
         completed_col = self.selections.get("completed_col")
         
-        if not start_col or not completed_col:
-            st.info("ℹ️ Please select a 'Starting Status' and 'Done Status' from the Chart-Specific Controls to generate charts.")
-            return
-            
-        is_valid, error_msg = StatusManager.validate_status_order(self.raw_df, start_col, completed_col)
-        if not is_valid:
-            st.error(error_msg)
-            return
+        self.processed_df = None
+        self.filtered_df = None
 
-        with st.spinner("🔄 Processing with selected statuses..."):
-            self.processed_df = DataProcessor.process_dates(self.raw_df, start_col, completed_col)
+        if start_col and completed_col and start_col != "None" and completed_col != "None":
+            is_valid, error_msg = StatusManager.validate_status_order(self.raw_df, start_col, completed_col)
+            if is_valid:
+                with st.spinner("🔄 Processing with selected statuses..."):
+                    self.processed_df = DataProcessor.process_dates(self.raw_df, start_col, completed_col)
+                if self.processed_df is not None:
+                    self.filtered_df = self._apply_all_filters(self.processed_df, apply_date_filter=True)
+            else:
+                st.sidebar.error(error_msg)
         
-        if self.processed_df is None or self.processed_df.empty:
-            st.error("No valid data found with the selected statuses.")
-            return
-
-        self.filtered_df = self._apply_all_filters(self.processed_df, apply_date_filter=True)
-        self._display_header_and_metrics()
+        if self.filtered_df is not None:
+            self._display_header_and_metrics()
+        
         self._display_charts()
 
     def _pre_process_for_sidebar(self) -> DataFrame:
@@ -825,29 +818,42 @@ class Dashboard:
                     df = df[df[f_name].str.contains(pattern, na=False)]
 
         if apply_date_filter:
-            df = self._apply_date_filter(df, self.selections["date_range"], self.selections["custom_start_date"], self.selections["custom_end_date"])
+            if self.processed_df is not None:
+                df = self._apply_date_filter(df, 'Completed date', self.selections["date_range"], self.selections["custom_start_date"], self.selections["custom_end_date"])
         
         return df
 
-    def _apply_date_filter(self, df: pd.DataFrame, date_range: str, custom_start_date, custom_end_date) -> pd.DataFrame:
-        """Filters the DataFrame based on the selected date range."""
-        if date_range == "All time": return df
+    def _apply_date_filter(self, df: pd.DataFrame, date_col_name: str, date_range: str, custom_start_date, custom_end_date) -> pd.DataFrame:
+        """Filters a DataFrame based on a date column and a selected date range string."""
+        if date_range == "All time" or pd.to_datetime(df[date_col_name], errors='coerce').isna().all():
+            return df
+        
         today = pd.to_datetime(datetime.now().date())
-        if date_range == "Last 30 days": cutoff = today - pd.DateOffset(days=30)
-        elif date_range == "Last 60 days": cutoff = today - pd.DateOffset(days=60)
-        elif date_range == "Last 90 days": cutoff = today - pd.DateOffset(days=90)
+        if date_range == "Last 30 days":
+            cutoff = today - pd.DateOffset(days=30)
+            return df[df[date_col_name] >= cutoff]
+        elif date_range == "Last 60 days":
+            cutoff = today - pd.DateOffset(days=60)
+            return df[df[date_col_name] >= cutoff]
+        elif date_range == "Last 90 days":
+            cutoff = today - pd.DateOffset(days=90)
+            return df[df[date_col_name] >= cutoff]
         elif date_range == "Custom" and custom_start_date and custom_end_date:
-            start_date, end_date = pd.to_datetime(custom_start_date), pd.to_datetime(custom_end_date)
-            return df[(df["Start date"] >= start_date) & ((df["Completed date"].isna()) | (df["Completed date"] <= end_date))]
-        else: return df
-        return df[(df["Start date"] >= cutoff) | ((df["Completed date"].isna()) | (df["Completed date"] >= cutoff))]
+            start_date = pd.to_datetime(custom_start_date)
+            end_date = pd.to_datetime(custom_end_date)
+            return df[(df[date_col_name] >= start_date) & (df[date_col_name] <= end_date)]
+        return df
 
+    # --- THIS FUNCTION HAS BEEN RESTORED ---
     def _calculate_forecast_days(self) -> int:
         """Calculates the number of days for the 'how many' forecast based on user selection."""
         range_selection = self.selections.get("forecast_range")
-        if range_selection == "Next 30 days": return 30
-        if range_selection == "Next 60 days": return 60
-        if range_selection == "Next 90 days": return 90
+        if range_selection == "Next 30 days":
+            return 30
+        if range_selection == "Next 60 days":
+            return 60
+        if range_selection == "Next 90 days":
+            return 90
         if range_selection == "Custom":
             custom_date = self.selections.get("forecast_custom_date")
             if custom_date:
@@ -878,7 +884,10 @@ class Dashboard:
     def _display_charts(self):
         """Displays the main chart area with tabs."""
         main_tabs = st.tabs(["📈 Cycle Time", "📊 Work Item Age", "🔄 WIP Trend", "📊 Throughput", "🔮 Throughput Forecast"])
-        cycle_stats = StatsCalculator.cycle_time_stats(self.filtered_df)
+        
+        cycle_stats = None
+        if self.filtered_df is not None:
+            cycle_stats = StatsCalculator.cycle_time_stats(self.filtered_df)
 
         with main_tabs[0]: self._display_cycle_time_charts(cycle_stats)
         with main_tabs[1]: self._display_work_item_age_chart(cycle_stats)
@@ -888,12 +897,16 @@ class Dashboard:
 
     def _display_cycle_time_charts(self, cycle_stats):
         """Displays the Cycle Time charts and statistics."""
-        st.header("Cycle Time Analysis"); st.markdown("Cycle time measures the total time from when work starts until it's completed.")
-        if cycle_stats:
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Average", f"{cycle_stats['average']} days"); c2.metric("Median (50th %ile)", f"{cycle_stats['median']} days"); c3.metric("85th Percentile", f"{cycle_stats['p85']} days"); c4.metric("95th Percentile", f"{cycle_stats['p95']} days")
-        else:
-            st.warning("⚠️ No items with both start and done dates to calculate cycle time statistics."); return
+        st.header("Cycle Time Analysis")
+        
+        if self.filtered_df is None or cycle_stats is None:
+            st.info("ℹ️ Please select a 'Starting Status' and 'Done Status' from the Chart-Specific Controls in the sidebar to generate Cycle Time charts.")
+            return
+
+        st.markdown("Cycle time measures the total time from when work starts until it's completed.")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Average", f"{cycle_stats['average']} days"); c2.metric("Median (50th %ile)", f"{cycle_stats['median']} days"); c3.metric("85th Percentile", f"{cycle_stats['p85']} days"); c4.metric("95th Percentile", f"{cycle_stats['p95']} days")
+        
         ct_tabs = st.tabs(["Scatter Plot", "Distribution (Histogram)", "Time in Status"])
         with ct_tabs[0]:
             chart = ChartGenerator.create_cycle_time_chart(self.filtered_df, self.selections["percentiles"])
@@ -951,28 +964,34 @@ class Dashboard:
         
         st.divider()
 
-        if self.selections["age_start_col"] and self.selections["age_done_col"]:
-            if cycle_stats:
-                age_df_source = self._apply_all_filters(self.processed_df, apply_date_filter=False)
-                chart = ChartGenerator.create_work_item_age_chart(
-                    age_df_source,
-                    self.selections["age_start_col"],
-                    self.selections["age_done_col"],
-                    cycle_stats,
-                    self.selections["percentiles"]
-                )
-                if chart:
-                    st.plotly_chart(chart, use_container_width=True)
-                else:
-                    st.warning("⚠️ No 'in progress' items found for Work Item Age chart with the selected statuses and filters.")
-            else:
-                st.warning("⚠️ Cycle time stats are not available to display on the Work Item Age chart.")
-        else:
+        if not self.selections["age_start_col"] or not self.selections["age_done_col"]:
             st.info("ℹ️ Please select a Start and End Status above to generate the chart.")
+            return
+
+        if cycle_stats is None:
+            st.warning("Cycle Time stats needed for percentile lines. Please select main Start/Done statuses in the sidebar.")
+        
+        age_df_source = self._apply_all_filters(self.processed_df if self.processed_df is not None else self.raw_df, apply_date_filter=False)
+        chart = ChartGenerator.create_work_item_age_chart(
+            age_df_source,
+            self.selections["age_start_col"],
+            self.selections["age_done_col"],
+            cycle_stats or {},
+            self.selections["percentiles"]
+        )
+        if chart:
+            st.plotly_chart(chart, use_container_width=True)
+        else:
+            st.warning("⚠️ No 'in progress' items found for Work Item Age chart with the selected statuses and filters.")
 
     def _display_wip_chart(self):
         """Displays the WIP chart."""
-        chart = ChartGenerator.create_wip_chart(self.filtered_df)
+        st.header("Work In Progress (WIP) Trend")
+        if self.filtered_df is None:
+            st.info("ℹ️ Please select a 'Starting Status' and 'Done Status' from the Chart-Specific Controls in the sidebar to generate the WIP chart.")
+            return
+
+        chart = ChartGenerator.create_wip_chart(self.filtered_df, self.selections['date_range'], self.selections['custom_start_date'], self.selections['custom_end_date'])
         if chart: st.plotly_chart(chart, use_container_width=True)
         else: st.warning("⚠️ No items with start dates for WIP chart.")
 
@@ -1003,11 +1022,16 @@ class Dashboard:
         self.selections['throughput_status_col'] = self.status_mapping.get(self.selections["throughput_status"])
 
         st.divider()
+        
+        source_df = self._apply_all_filters(self.raw_df, apply_date_filter=False)
 
         chart = ChartGenerator.create_throughput_chart(
-            self.filtered_df, 
+            source_df, 
             self.selections["throughput_interval"],
-            self.selections['throughput_status_col']
+            self.selections['throughput_status_col'],
+            self.selections['date_range'],
+            self.selections['custom_start_date'],
+            self.selections['custom_end_date']
         )
         if chart:
             st.plotly_chart(chart, use_container_width=True)
@@ -1018,7 +1042,11 @@ class Dashboard:
         """Displays the Forecasting charts and controls."""
         st.header("Throughput Forecasting")
         
-        throughput_status = self.selections.get('throughput_status', 'N/A')
+        throughput_status = self.selections.get('throughput_status')
+        if not throughput_status or throughput_status == "None":
+            st.info("ℹ️ Please select a throughput status on the 'Throughput' tab to enable forecasting.")
+            return
+
         info_text = (
             "Uses historical throughput data to run Monte Carlo simulations and forecast future outcomes. "
             f"The forecast simulation is based on items reaching the **'{throughput_status}'** status selected on the Throughput chart."
@@ -1027,7 +1055,7 @@ class Dashboard:
         
         forecast_tabs = st.tabs(["**How Many** (by date)", "**When** (by # of items)"])
         
-        forecast_source_df = self._apply_all_filters(self.processed_df, apply_date_filter=False)
+        forecast_source_df = self._apply_all_filters(self.raw_df, apply_date_filter=False)
         throughput_status_col = self.selections.get('throughput_status_col')
 
         with forecast_tabs[0]:
@@ -1150,6 +1178,26 @@ def display_welcome_message():
         "No data from your uploaded file is ever saved, stored, or logged on any server. When you close this browser tab, your data is permanently discarded."
     )
 
+def _apply_date_filter(df: pd.DataFrame, date_col_name: str, date_range: str, custom_start_date, custom_end_date) -> pd.DataFrame:
+    """Filters a DataFrame based on a date column and a selected date range string."""
+    if date_range == "All time" or pd.to_datetime(df[date_col_name], errors='coerce').isna().all():
+        return df
+    
+    today = pd.to_datetime(datetime.now().date())
+    if date_range == "Last 30 days":
+        cutoff = today - pd.DateOffset(days=30)
+        return df[df[date_col_name] >= cutoff]
+    elif date_range == "Last 60 days":
+        cutoff = today - pd.DateOffset(days=60)
+        return df[df[date_col_name] >= cutoff]
+    elif date_range == "Last 90 days":
+        cutoff = today - pd.DateOffset(days=90)
+        return df[df[date_col_name] >= cutoff]
+    elif date_range == "Custom" and custom_start_date and custom_end_date:
+        start_date = pd.to_datetime(custom_start_date)
+        end_date = pd.to_datetime(custom_end_date)
+        return df[(df[date_col_name] >= start_date) & (df[date_col_name] <= end_date)]
+    return df
 
 def format_multiselect_display(selection, name: str) -> str:
     """Formats a list from a multiselect for clean display."""
