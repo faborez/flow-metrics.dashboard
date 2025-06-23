@@ -57,7 +57,7 @@ class ChartConfig:
     WIP_CHART_HOVER = "<b>Date:</b> %{x|%d/%m/%Y}<br><b>WIP count:</b> %{y}<br><b>Breakdown:</b><br>%{customdata[0]}<extra></extra>"
     THROUGHPUT_CHART_HOVER = (
         "<b>Period ending = %{customdata[0]}</b><br>"
-        "Throughput = %{y} items<br><b>Breakdown:</b><br>%{customdata[1]}<extra></extra>"
+        "Throughput = %{y} items<br>%{customdata[1]}<extra></extra>"
     )
     TREND_LINE_HOVER = "<b>Trend Line</b><br>Date = %{x|%d/%m/%Y}<br>Trend value = %{y:.1f}<extra></extra>"
 
@@ -154,7 +154,6 @@ class DataProcessor:
 class ChartGenerator:
     """Generates Plotly charts for the dashboard."""
     @staticmethod
-    @st.cache_data
     def create_cycle_time_chart(df: DataFrame, percentile_settings: Dict[str, bool]) -> Optional[Figure]:
         """Creates the cycle time scatterplot."""
         completed_df = df.dropna(subset=['Start date', 'Completed date', 'Cycle time'])
@@ -183,7 +182,6 @@ class ChartGenerator:
         return fig
 
     @staticmethod
-    @st.cache_data
     def create_cycle_time_histogram(df: DataFrame, percentile_settings: Dict[str, bool]) -> Optional[Figure]:
         """Creates a histogram of cycle time distribution."""
         completed_df = df.dropna(subset=['Cycle time'])
@@ -209,7 +207,6 @@ class ChartGenerator:
         return fig
     
     @staticmethod
-    @st.cache_data
     def create_time_in_status_chart(df: DataFrame, status_cols: List[str]) -> Tuple[Optional[Figure], Optional[DataFrame]]:
         """Calculates and creates a bar chart of the average time spent in each status."""
         
@@ -261,7 +258,6 @@ class ChartGenerator:
         return fig, chart_df
 
     @staticmethod
-    @st.cache_data
     def create_work_item_age_chart(df: DataFrame, axis_start_col: str, axis_done_col: str, cycle_time_percentiles: Dict[str, int], percentile_settings: Dict[str, bool]) -> Optional[Figure]:
         """Creates the work item age chart."""
         df_in_progress = df[df['Completed date'].isna()].copy()
@@ -344,7 +340,6 @@ class ChartGenerator:
         ))
     
     @staticmethod
-    @st.cache_data
     def create_wip_chart(df: DataFrame, date_range: str, custom_start_date: Optional[datetime], custom_end_date: Optional[datetime]) -> Optional[Figure]:
         """Creates the WIP (Work In Progress) run chart."""
         if df is None: return None
@@ -386,7 +381,6 @@ class ChartGenerator:
         return fig
 
     @staticmethod
-    @st.cache_data
     def create_throughput_chart(df: DataFrame, interval: str, throughput_status_col: str, date_range: str, custom_start_date: Optional[datetime], custom_end_date: Optional[datetime], sprint_anchor_date: Optional[datetime.date] = None) -> Optional[Figure]:
         """Creates the throughput bar chart."""
         if not throughput_status_col:
@@ -815,12 +809,12 @@ class Dashboard:
 
     def _sidebar_chart_controls(self):
         """Controls for customizing individual charts."""
-        with st.sidebar.expander("📈 Cycle Time & WIP Charts", expanded=True):
+        with st.sidebar.expander("📈 Cycle Time Charts", expanded=True):
             status_options = ["None"] + list(self.status_mapping.keys())
             self.selections["start_status"] = st.sidebar.selectbox(
                 "Starting Status",
                 status_options,
-                help="Select when work starts. This defines the start of Cycle Time and when an item becomes Work in Progress (WIP)."
+                help="Select when work starts. This defines the start of Cycle Time."
             )
             self.selections["completed_status"] = st.sidebar.selectbox(
                 "Done Status",
@@ -863,29 +857,8 @@ class Dashboard:
 
         if apply_date_filter:
             if self.processed_df is not None:
-                df = self._apply_date_filter(df, 'Completed date', self.selections["date_range"], self.selections["custom_start_date"], self.selections["custom_end_date"])
+                df = _apply_date_filter(df, 'Completed date', self.selections["date_range"], self.selections["custom_start_date"], self.selections["custom_end_date"])
         
-        return df
-
-    def _apply_date_filter(self, df: pd.DataFrame, date_col_name: str, date_range: str, custom_start_date, custom_end_date) -> pd.DataFrame:
-        """Filters a DataFrame based on a date column and a selected date range string."""
-        if date_range == "All time" or pd.to_datetime(df[date_col_name], errors='coerce').isna().all():
-            return df
-        
-        today = pd.to_datetime(datetime.now().date())
-        if date_range == "Last 30 days":
-            cutoff = today - pd.DateOffset(days=30)
-            return df[(df[date_col_name] >= cutoff) & (df[date_col_name] <= today)]
-        elif date_range == "Last 60 days":
-            cutoff = today - pd.DateOffset(days=60)
-            return df[(df[date_col_name] >= cutoff) & (df[date_col_name] <= today)]
-        elif date_range == "Last 90 days":
-            cutoff = today - pd.DateOffset(days=90)
-            return df[(df[date_col_name] >= cutoff) & (df[date_col_name] <= today)]
-        elif date_range == "Custom" and custom_start_date and custom_end_date:
-            start_date = pd.to_datetime(custom_start_date)
-            end_date = pd.to_datetime(custom_end_date)
-            return df[(df[date_col_name] >= start_date) & (df[date_col_name] <= end_date)]
         return df
 
     def _display_initial_info(self):
@@ -996,10 +969,17 @@ class Dashboard:
             st.info("ℹ️ Please select a Start and End Status above to generate the chart.")
             return
 
+        # Process dates for this specific chart
+        age_processed_df = DataProcessor.process_dates(self.raw_df, self.selections["age_start_col"], self.selections["age_done_col"])
+        
+        if age_processed_df is None:
+            st.error("Could not process dates for the selected aging statuses.")
+            return
+
         if cycle_stats is None:
             st.warning("Cycle Time stats needed for percentile lines. Please select main Start/Done statuses in the sidebar.")
         
-        age_df_source = self._apply_all_filters(self.processed_df if self.processed_df is not None else self.raw_df, apply_date_filter=False)
+        age_df_source = self._apply_all_filters(age_processed_df, apply_date_filter=False)
         chart = ChartGenerator.create_work_item_age_chart(
             age_df_source,
             self.selections["age_start_col"],
@@ -1015,12 +995,27 @@ class Dashboard:
     def _display_wip_chart(self):
         """Displays the WIP chart."""
         st.header("Work In Progress (WIP) Trend")
-        if self.processed_df is None:
-            st.info("ℹ️ Please select a 'Starting Status' and 'Done Status' from the Chart-Specific Controls in the sidebar to generate the WIP chart.")
+        
+        status_options = ["None"] + list(self.status_mapping.keys())
+        col1, col2 = st.columns(2)
+
+        with col1:
+            self.selections["wip_start_status"] = st.selectbox("WIP Start Status", status_options, key="wip_start")
+        with col2:
+            self.selections["wip_done_status"] = st.selectbox("WIP End Status", status_options, key="wip_end")
+
+        self.selections["wip_start_col"] = self.status_mapping.get(self.selections["wip_start_status"])
+        self.selections["wip_done_col"] = self.status_mapping.get(self.selections["wip_done_status"])
+        
+        st.divider()
+
+        if not self.selections["wip_start_col"] or not self.selections["wip_done_col"]:
+            st.info("ℹ️ Please select a Start and End Status above to generate the WIP chart.")
             return
 
-        # Pass the processed_df with non-date filters applied to get an accurate WIP count
-        source_df = self._apply_all_filters(self.processed_df, apply_date_filter=False)
+        wip_processed_df = DataProcessor.process_dates(self.raw_df, self.selections["wip_start_col"], self.selections["wip_done_col"])
+        source_df = self._apply_all_filters(wip_processed_df, apply_date_filter=False)
+
         chart = ChartGenerator.create_wip_chart(source_df, self.selections['date_range'], self.selections['custom_start_date'], self.selections['custom_end_date'])
         if chart: st.plotly_chart(chart, use_container_width=True)
         else: st.warning("⚠️ No items with start dates for WIP chart.")
