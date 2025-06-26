@@ -11,6 +11,7 @@ from pandas import DataFrame
 from plotly.graph_objs import Figure
 import base64
 import os
+import unicodedata
 
 # Configuration
 st.set_page_config(page_title="Flow Metrics Dashboard", layout="wide")
@@ -49,6 +50,12 @@ class ChartConfig:
         "%{customdata[0]}<br><b>Work type:</b> %{customdata[1]}<br>"
         "<b>Completed:</b> %{customdata[2]}<br><b>Start:</b> %{customdata[3]}<br>"
         "<b>Cycle time:</b> %{customdata[4]} days<extra></extra>"
+    )
+    BUBBLE_CHART_HOVER = (
+        "<b>Items:</b> %{marker.size}<br>"
+        "<b>Cycle Time:</b> %{y} days<br>"
+        "<b>Completed Date:</b> %{x|%d/%m/%Y}<br>"
+        "<b>Keys:</b><br>%{customdata[0]}<extra></extra>"
     )
     AGE_CHART_HOVER = (
         "%{customdata[0]}<br><b>Work type:</b> %{customdata[1]}<br><b>Status:</b> %{customdata[2]}<br>"
@@ -91,16 +98,22 @@ class DataProcessor:
     @st.cache_data
     def load_data(uploaded_file) -> Optional[DataFrame]:
         """Loads data from the uploaded CSV file."""
-        try:
-            df = pd.read_csv(uploaded_file, keep_default_na=False, encoding='utf-8')
-            df = df.dropna(how='all')
-            if not {'Key', 'Issue Type'}.issubset(df.columns):
-                st.error("Invalid file format: CSV must include 'Key' and 'Issue Type' columns.")
+        encodings = ['utf-8', 'latin1', 'iso-8859-1']
+        for encoding in encodings:
+            try:
+                df = pd.read_csv(uploaded_file, keep_default_na=False, encoding=encoding)
+                df = df.dropna(how='all')
+                if not {'Key', 'Issue Type'}.issubset(df.columns):
+                    st.error("Invalid file format: CSV must include 'Key' and 'Issue Type' columns.")
+                    return None
+                return df
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                st.error(f"Error loading data with encoding {encoding}: {str(e)}")
                 return None
-            return df
-        except Exception as e:
-            st.error(f"Error loading data: {str(e)}")
-            return None
+        st.error("Failed to load CSV: Unable to decode with supported encodings (utf-8, latin1, iso-8859-1).")
+        return None
 
     @staticmethod
     def clean_data(df: DataFrame) -> DataFrame:
@@ -115,8 +128,16 @@ class DataProcessor:
             )
         
         df_clean = df_clean.drop_duplicates(subset=['Key'], keep='first').copy()
-        if 'Work type' in df_clean.columns:
-            df_clean.loc[:, 'Work type'] = df_clean['Work type'].str.strip()
+        
+        def normalize_text(text):
+            if not isinstance(text, str):
+                return text
+            return unicodedata.normalize('NFKC', text).strip()
+
+        for col in ['Key', 'Work type', 'Status']:
+            if col in df_clean.columns:
+                df_clean[col] = df_clean[col].apply(normalize_text)
+            
         return df_clean
 
     @staticmethod
@@ -156,17 +177,22 @@ class ChartGenerator:
     @staticmethod
     @st.cache_data
     def create_cycle_time_chart(df: DataFrame, percentile_settings: Dict[str, bool]) -> Optional[Figure]:
-        """Creates the cycle time scatterplot."""
+        """Creates the cycle time scatterplot with vertical jitter."""
         completed_df = df.dropna(subset=['Start date', 'Completed date', 'Cycle time'])
         if completed_df.empty:
             return None
 
         chart_df = ChartGenerator._prepare_chart_data(completed_df, ['Key', 'Work type', 'Completed date', 'Start date', 'Cycle time'])
+        
+        jitter_strength = 0.4
+        chart_df['Cycle_time_jittered'] = chart_df['Cycle time'] + np.random.uniform(-jitter_strength, jitter_strength, size=len(chart_df))
+
         fig = go.Figure()
         for work_type in ChartGenerator._order_work_types(chart_df):
             df_type = chart_df[chart_df['Work type'] == work_type]
             fig.add_trace(go.Scatter(
-                x=df_type['Completed date'], y=df_type['Cycle time'], mode='markers', name=work_type,
+                x=df_type['Completed date'], y=df_type['Cycle_time_jittered'],
+                mode='markers', name=work_type,
                 marker=dict(color=Config.WORK_TYPE_COLORS.get(work_type, Config.DEFAULT_COLOR), size=8, opacity=0.7),
                 customdata=df_type[['Key', 'Work type', 'Completed_date_formatted', 'Start_date_formatted', 'Cycle_time_formatted']],
                 hovertemplate=ChartConfig.CYCLE_TIME_HOVER
@@ -181,6 +207,84 @@ class ChartGenerator:
                 ChartGenerator._add_hoverable_line(fig, y_value, chart_df["Completed date"], hover_text, color, f"{p}th: {int(y_value)}d")
         
         return fig
+
+    @staticmethod
+    @st.cache_data
+    def create_cycle_time_bubble_chart(df: DataFrame, percentile_settings: Dict[str, bool]) -> Optional[Figure]:
+        """Creates an aggregated bubble chart for cycle times."""
+        completed_df = df.dropna(subset=['Completed date', 'Cycle time'])
+        if completed_df.empty:
+            return None
+
+        agg_df = completed_df.groupby(['Completed date', 'Cycle time']).agg(
+            item_count=('Key', 'size'),
+            keys=('Key', lambda x: '<br>'.join(x))
+        ).reset_index()
+
+        fig = go.Figure(data=[go.Scatter(
+            x=agg_df['Completed date'],
+            y=agg_df['Cycle time'],
+            mode='markers+text',
+            text=agg_df['item_count'],
+            textposition='middle center',
+            textfont=dict(color='white', size=10),
+            marker=dict(
+                size=agg_df['item_count'],
+                sizemode='area',
+                sizeref=2.*agg_df['item_count'].max()/(40.**2),
+                sizemin=4,
+                color='#3B82F6',
+                opacity=0.7
+            ),
+            customdata=agg_df[['keys']],
+            hovertemplate=ChartConfig.BUBBLE_CHART_HOVER
+        )])
+
+        fig.update_layout(
+            title="Aggregated Cycle Time Bubble Chart",
+            xaxis_title="Completed Date",
+            yaxis_title="Cycle Time (Days)",
+            height=600
+        )
+
+        for p, color in Config.PERCENTILE_COLORS.items():
+            if percentile_settings.get(f"show_{p}th", True):
+                y_value = np.percentile(completed_df["Cycle time"], p)
+                hover_text = f"<b>{p}th Percentile</b><br>Value: {int(y_value)} days<br><i>{p}% of items finish in this time or less.</i>"
+                ChartGenerator._add_hoverable_line(fig, y_value, agg_df["Completed date"], hover_text, color, f"{p}th: {int(y_value)}d")
+                
+        return fig
+    
+    @staticmethod
+    @st.cache_data
+    def create_cycle_time_box_plot(df: DataFrame, interval: str, percentile_settings: Dict[str, bool]) -> Optional[Figure]:
+        """Creates a box plot of cycle times over a given interval."""
+        df_completed = df.dropna(subset=['Completed date', 'Cycle time']).copy()
+        if df_completed.empty:
+            return None
+
+        freq_map = {'Weekly': 'W-MON', 'Monthly': 'MS'}
+        df_completed['Period'] = df_completed['Completed date'].dt.to_period(freq_map[interval]).dt.start_time
+
+        fig = px.box(
+            df_completed, 
+            x='Period', 
+            y='Cycle time',
+            title=f'Cycle Time Distribution per {interval}',
+            labels={'Period': interval, 'Cycle time': 'Cycle Time (Days)'},
+            points='all'
+        )
+        fig.update_layout(height=600)
+        
+        for p, color in Config.PERCENTILE_COLORS.items():
+            if percentile_settings.get(f"show_{p}th", True):
+                y_value = np.percentile(df_completed["Cycle time"], p)
+                hover_text = f"<b>{p}th Percentile</b><br>Value: {int(y_value)} days<br><i>{p}% of items finish in this time or less.</i>"
+                # For box plots, we add a simple line across the whole chart
+                fig.add_hline(y=y_value, line_dash="dash", line_color=color, annotation_text=f"{p}th: {int(y_value)}d", annotation_position="top left")
+                
+        return fig
+
 
     @staticmethod
     @st.cache_data
@@ -261,73 +365,90 @@ class ChartGenerator:
         return fig, chart_df
 
     @staticmethod
-    def create_work_item_age_chart(df: DataFrame, axis_start_col: str, axis_done_col: str, cycle_time_percentiles: Dict[str, int], percentile_settings: Dict[str, bool]) -> Optional[Figure]:
-        """Creates the work item age chart."""
-        df_in_progress = df[df['Completed date'].isna()].copy()
-        if df_in_progress.empty:
-            return None
-
+    def create_work_item_age_chart(df: DataFrame, status_order: List[str], cycle_time_percentiles: Dict[str, int], percentile_settings: Dict[str, bool]) -> Optional[Figure]:
+        """Creates the work item age chart with a column-based layout and horizontal jitter."""
         age_data = []
-        for _, row in df_in_progress.iterrows():
-            start_date_str = DataProcessor._extract_earliest_date(row[axis_start_col])
-            if start_date_str:
+        for _, row in df.iterrows():
+            start_date_val = row.get('Start date')
+            if pd.notna(start_date_val):
                 age_data.append({
                     'Key': row['Key'], 'Work type': row['Work type'], 'Status': row['Status'],
-                    'Age': (datetime.now() - pd.to_datetime(start_date_str)).days + 1,
-                    'Start date': pd.to_datetime(start_date_str)
+                    'Age': (datetime.now() - start_date_val).days + 1,
+                    'Start date': start_date_val
                 })
         
-        if not age_data:
-            return None
-        
-        try:
-            all_status_cols = list(df.columns)
-            start_idx = all_status_cols.index(axis_start_col)
-            end_idx = all_status_cols.index(axis_done_col)
-            status_order = [s.replace("'->", "").strip() for s in all_status_cols[start_idx : end_idx + 1]]
-        except ValueError:
-            return None
-        
+        if not age_data: return None
         age_df = pd.DataFrame(age_data)
-        chart_df = ChartGenerator._prepare_chart_data(age_df, ['Key', 'Work type', 'Status', 'Age', 'Start date'])
-        chart_df['Status'] = pd.Categorical(chart_df['Status'], categories=status_order, ordered=True)
-        chart_df.dropna(subset=['Status'], inplace=True)
+        
+        age_df_filtered = age_df[age_df['Status'].isin(status_order)].copy()
+        if age_df_filtered.empty: return None
+
+        status_map = {status: i for i, status in enumerate(status_order)}
+        age_df_filtered['Status_Num'] = age_df_filtered['Status'].map(status_map)
+        
+        jitter_strength = 0.25 
+        age_df_filtered['Status_Jittered'] = age_df_filtered['Status_Num'] + np.random.uniform(-jitter_strength, jitter_strength, size=len(age_df_filtered))
+        
+        chart_df = ChartGenerator._prepare_chart_data(age_df_filtered, ['Key', 'Work type', 'Status', 'Age', 'Status_Jittered', 'Start date'])
+        chart_df.dropna(subset=['Status', 'Status_Jittered'], inplace=True)
+        if chart_df.empty: return None
 
         fig = go.Figure()
         for work_type in ChartGenerator._order_work_types(chart_df):
             df_type = chart_df[chart_df['Work type'] == work_type]
             fig.add_trace(go.Scatter(
-                x=df_type['Status'], y=df_type['Age'], mode='markers', name=work_type,
+                x=df_type['Status_Jittered'], y=df_type['Age'], mode='markers', name=work_type,
                 marker=dict(color=Config.WORK_TYPE_COLORS.get(work_type, Config.DEFAULT_COLOR), size=8, opacity=0.7),
                 customdata=df_type[['Key', 'Work type', 'Status', 'Start_date_formatted', 'Age_formatted']],
                 hovertemplate=ChartConfig.AGE_CHART_HOVER
             ))
         
-        num_statuses = len(status_order)
-        domain_end = min(1.0, num_statuses / 6.0) if num_statuses > 0 else 1.0
+        max_age = chart_df['Age'].max() if not chart_df.empty else 10
+        y_axis_max = max_age * 1.15
 
         fig.update_layout(
-            title="Work Item Age Chart", xaxis_title="Status", yaxis_title="Age (Calendar Days)", 
+            title="Work Item Age Chart",
+            yaxis_title="<b>Age (Calendar Days)</b>",
             height=600, legend_title="Work Type",
             xaxis=dict(
-                domain=[0, domain_end], 
-                categoryorder='array', 
-                categoryarray=status_order, 
-                range=[-0.5, num_statuses - 0.5],
-                showgrid=True,
-                gridcolor='LightGrey',
-                gridwidth=1
+                title_text="", 
+                tickvals=list(status_map.values()),
+                ticktext=[f"<b>{s}</b>" for s in status_map.keys()],
+                tickfont=dict(size=14),
+                showgrid=False,
+                zeroline=False
             ),
-            legend=dict(x=domain_end * 1.02, xanchor='left')
+            yaxis=dict(
+                showgrid=True,
+                zeroline=True, zerolinewidth=1, zerolinecolor='LightGrey',
+                tickfont=dict(size=14),
+                title_font=dict(size=16),
+                range=[0, y_axis_max]
+            ),
+            showlegend=True
         )
         
+        for i in range(len(status_order)):
+            if i > 0:
+                fig.add_vline(x=i - 0.5, line_width=2, line_color='LightGrey')
+            
+            count = len(chart_df[chart_df['Status'] == status_order[i]])
+            fig.add_annotation(
+                x=i, y=y_axis_max, text=f"<b>WIP = {count}</b>",
+                showarrow=False, font=dict(size=14, color="black"),
+                yanchor="bottom",
+                yshift=5 
+            )
+
         if cycle_time_percentiles:
+            x_range_for_lines = [-0.5, len(status_order) - 0.5]
             for p_int_str, p_val in cycle_time_percentiles.items():
                 if p_int_str.startswith('p'):
                     p = int(p_int_str[1:])
                     if percentile_settings.get(f"show_{p}th", True):
                         hover_text = f"<b>{p}th Percentile (from Cycle Time)</b><br>Value: {p_val} days<br><i>Items above this line are aging longer than {p}% of past items.</i>"
-                        ChartGenerator._add_hoverable_line(fig, p_val, status_order, hover_text, Config.PERCENTILE_COLORS.get(p), f"{p}th: {p_val}d")
+                        ChartGenerator._add_hoverable_line(fig, p_val, x_range_for_lines, hover_text, Config.PERCENTILE_COLORS.get(p), f"{p}th: {p_val}d")
+        
         return fig
 
     @staticmethod
@@ -641,15 +762,16 @@ class ChartGenerator:
     @staticmethod
     def _prepare_chart_data(df: DataFrame, columns: List[str]) -> DataFrame:
         """Prepares a DataFrame for charting by formatting columns."""
-        chart_df = df[columns].copy()
+        chart_df = df.copy()
         for col in ['Completed date', 'Start date']:
-            if col in chart_df.columns:
+            if col in chart_df.columns and not chart_df[col].dropna().empty:
                 chart_df[f'{col.replace(" ", "_")}_formatted'] = chart_df[col].dt.strftime('%d/%m/%Y')
         for col in ['Cycle time', 'Age']:
             if col in chart_df.columns:
                 chart_df[f'{col.replace(" ", "_")}_formatted'] = chart_df[col].astype(int).astype(str)
         chart_df['Work type'] = pd.Categorical(chart_df['Work type'], categories=ChartGenerator._order_work_types(chart_df), ordered=True)
         return chart_df
+
 
     @staticmethod
     def _order_work_types(df: DataFrame) -> List[str]:
@@ -707,6 +829,7 @@ class Dashboard:
 
     def run(self):
         """Executes the main dashboard workflow."""
+        st.cache_data.clear()
         with st.spinner("🔄 Processing JIRA export..."):
             loaded_df = DataProcessor.load_data(self.uploaded_file)
             if loaded_df is None: return
@@ -725,7 +848,7 @@ class Dashboard:
 
     def _pre_process_for_sidebar(self) -> DataFrame:
         """A light processing step to get all possible dates for sidebar validation."""
-        status_cols = list(StatusManager.extract_status_columns(self.raw_df).values())
+        status_cols = list(self.status_mapping.values())
         if not status_cols:
             return pd.DataFrame({'Start date': [pd.NaT], 'Completed date': [pd.NaT]})
 
@@ -865,12 +988,15 @@ class Dashboard:
         st.header("Cycle Time Analysis")
         
         status_options = ["None"] + list(self.status_mapping.keys())
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
 
         with col1:
             self.selections["start_status"] = st.selectbox("Starting Status", status_options, key="cycle_time_start")
         with col2:
             self.selections["completed_status"] = st.selectbox("Done Status", status_options, key="cycle_time_end")
+        
+        with col3:
+            self.selections["box_plot_interval"] = st.selectbox("Box Plot Grouping", ["Weekly", "Monthly"], index=0)
         
         self.selections["start_col"] = self.status_mapping.get(self.selections["start_status"])
         self.selections["completed_col"] = self.status_mapping.get(self.selections["completed_status"])
@@ -897,16 +1023,29 @@ class Dashboard:
 
         self._display_header_and_metrics(summary_stats)
         
-        ct_tabs = st.tabs(["Scatter Plot", "Distribution (Histogram)", "Time in Status"])
+        ct_tabs = st.tabs(["Scatter Plot", "Bubble Chart", "Box Plot", "Distribution (Histogram)", "Time in Status"])
         with ct_tabs[0]:
+            st.subheader("Scatter Plot")
+            st.markdown("ℹ️ *A small amount of random vertical 'jitter' has been added to separate overlapping points.*")
             chart = ChartGenerator.create_cycle_time_chart(self.filtered_df, self.selections["percentiles"])
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("⚠️ No items with both start and done dates for Cycle Time scatter plot.")
         with ct_tabs[1]:
+            st.subheader("Aggregated Bubble Chart")
+            st.markdown("ℹ️ *Bubbles represent one or more items completed on the same day with the same cycle time.*")
+            chart = ChartGenerator.create_cycle_time_bubble_chart(self.filtered_df, self.selections["percentiles"])
+            if chart: st.plotly_chart(chart, use_container_width=True)
+            else: st.warning("⚠️ No items to display in the Bubble Chart.")
+        with ct_tabs[2]:
+            st.subheader("Cycle Time Distribution Over Time")
+            chart = ChartGenerator.create_cycle_time_box_plot(self.filtered_df, self.selections["box_plot_interval"], self.selections["percentiles"])
+            if chart: st.plotly_chart(chart, use_container_width=True)
+            else: st.warning("⚠️ No items to display in the Box Plot.")
+        with ct_tabs[3]:
             chart = ChartGenerator.create_cycle_time_histogram(self.filtered_df, self.selections["percentiles"])
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("⚠️ No items to display in Cycle Time histogram.")
-        with ct_tabs[2]:
+        with ct_tabs[4]:
             st.markdown("This chart shows the average time items spend in each status column of your raw data export.")
             status_cols = list(self.status_mapping.values())
             chart, chart_data = ChartGenerator.create_time_in_status_chart(self.raw_df, status_cols)
@@ -929,47 +1068,68 @@ class Dashboard:
     def _display_work_item_age_chart(self):
         """Displays the Work Item Age chart and its controls."""
         st.header("Work Item Age Analysis")
-        st.markdown("This chart shows how old your current 'in progress' items are. Use the controls below to define the statuses on the x-axis.")
-
+        st.markdown("This chart shows the age of your current 'in progress' items. The age of each item is calculated from its entry into the selected 'Start Status'.")
+        
         status_options = ["None"] + list(self.status_mapping.keys())
-        col1, col2 = st.columns(2)
+        sensible_done_options = [s for s in status_options if s.lower() == 'done']
+        default_done_index = status_options.index(sensible_done_options[0]) if sensible_done_options else len(status_options) - 1
 
-        with col1:
-            self.selections["age_start_status"] = st.selectbox("Start Status (for Age calculation)", status_options, key="age_start")
-        with col2:
-            self.selections["age_done_status"] = st.selectbox("End Status", status_options, key="age_end")
+        with st.expander("Work Item Age Chart Controls", expanded=True):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                self.selections["age_start_status"] = st.selectbox("Start Status (for X-Axis & Age Calculation)", status_options, key="age_start", index=1 if len(status_options) > 1 else 0)
+            with col2:
+                try:
+                    default_end_index = status_options.index("In Testing")
+                except ValueError:
+                    default_end_index = len(status_options) - 2 if len(status_options) > 2 else 0
+                self.selections["age_end_status"] = st.selectbox("End Status (for X-Axis)", status_options, key="age_end", index=default_end_index)
+            with col3:
+                self.selections["age_true_final_status"] = st.selectbox("Select the true 'Done' status", status_options, key="age_final", index=default_done_index, help="Select the status that marks an item as completely finished for your workflow.")
 
         self.selections["age_start_col"] = self.status_mapping.get(self.selections["age_start_status"])
-        self.selections["age_done_col"] = self.status_mapping.get(self.selections["age_done_status"])
+        self.selections["age_end_col"] = self.status_mapping.get(self.selections["age_end_status"])
+        self.selections["age_true_final_col"] = self.status_mapping.get(self.selections["age_true_final_status"])
         
         st.divider()
 
-        if not self.selections["age_start_col"] or not self.selections["age_done_col"]:
-            st.info("ℹ️ Please select a Start and End Status above to generate the chart.")
+        if not all([self.selections["age_start_col"], self.selections["age_end_col"], self.selections["age_true_final_col"]]):
+            st.info("ℹ️ Please select all three status controls above to generate the chart.")
             return
 
-        age_processed_df = DataProcessor.process_dates(self.raw_df, self.selections["age_start_col"], self.selections["age_done_col"])
+        df = self.raw_df.copy()
+        final_col = self.selections["age_true_final_col"]
+        start_col = self.selections["age_start_col"]
         
-        if age_processed_df is None:
-            st.error("Could not process dates for the selected aging statuses.")
+        is_not_finished_mask = df[final_col].apply(lambda x: pd.isna(DataProcessor._extract_earliest_date(x)))
+        df_in_progress = df[is_not_finished_mask].copy()
+        
+        df_in_progress['Start date'] = pd.to_datetime(df_in_progress[start_col].apply(DataProcessor._extract_earliest_date), errors='coerce')
+        age_df_source = df_in_progress.dropna(subset=['Start date']).copy()
+
+        age_df_source = self._apply_all_filters(age_df_source, apply_date_filter=False)
+        
+        try:
+            raw_cols = list(self.raw_df.columns)
+            start_idx = raw_cols.index(self.selections["age_start_col"])
+            end_idx = raw_cols.index(self.selections["age_end_col"])
+            status_order = [s.replace("'->", "").strip() for s in raw_cols[start_idx : end_idx + 1]]
+        except (ValueError, IndexError):
+            st.error("Could not determine status order for the chart axis. Check your axis status selections.")
             return
-        
+
         cycle_stats = StatsCalculator.cycle_time_stats(self.filtered_df) if self.filtered_df is not None else None
-        if cycle_stats is None:
-            st.warning("Cycle Time stats from the first tab are needed for percentile lines. Please select Start/Done statuses on the 'Cycle Time' tab.")
         
-        age_df_source = self._apply_all_filters(age_processed_df, apply_date_filter=False)
         chart = ChartGenerator.create_work_item_age_chart(
             age_df_source,
-            self.selections["age_start_col"],
-            self.selections["age_done_col"],
-            cycle_stats or {},
-            self.selections["percentiles"]
+            status_order=status_order,
+            cycle_time_percentiles=cycle_stats or {},
+            percentile_settings=self.selections["percentiles"]
         )
         if chart:
             st.plotly_chart(chart, use_container_width=True)
         else:
-            st.warning("⚠️ No 'in progress' items found for Work Item Age chart with the selected statuses and filters.")
+            st.warning("⚠️ No 'in progress' items found to plot based on your selections. Please check that your 'Start' and 'Done' statuses are correct.")
 
     def _display_wip_chart(self):
         """Displays the WIP chart."""
@@ -1155,26 +1315,7 @@ def display_welcome_message():
     """Displays the initial welcome message and instructions."""
     st.markdown("### 👋 Welcome to the Flow Metrics Dashboard!")
     
-    def _create_inline_link_with_logo(text: str, logo_path: str, url: str) -> str:
-        """Creates a markdown-compatible HTML string for a link with an inline logo."""
-        try:
-            with open(logo_path, "rb") as f:
-                logo_b64 = base64.b64encode(f.read()).decode()
-            return (
-                f'<a href="{url}" target="_blank" style="text-decoration: none; color: inherit; font-weight: bold;">'
-                f'<img src="data:image/png;base64,{logo_b64}" style="height: 1.1em; vertical-align: -0.2em; margin-right: 5px;">'
-                f'{text}</a>'
-            )
-        except FileNotFoundError:
-            return f'<a href="{url}" target="_blank">**{text}**</a>'
-            
-    pro_url = "https://marketplace.atlassian.com/apps/1221826/status-time-reports-time-in-status"
-    pro_link = _create_inline_link_with_logo("Status Time Reports", "Status time pro icon.png", pro_url)
-    
-    free_url = "https://marketplace.atlassian.com/apps/1222051/status-time-reports-free-time-in-status?hosting=cloud&tab=overview"
-    free_link = _create_inline_link_with_logo("Status Time Reports Free", "Status time free icon.png", free_url)
-
-    st.markdown(f"A dynamic set of flow metrics charts and forecasting built to analyze data exported from the Jira plugins {pro_link} & {free_link}.", unsafe_allow_html=True)
+    st.markdown("A dynamic set of flow metrics charts and forecasting built to analyze data exported from specific Jira plugins.")
 
     with st.expander("How to export your data from Jira", expanded=True):
         st.markdown("""
@@ -1182,7 +1323,7 @@ def display_welcome_message():
         1. In the plugin, select the projects, filters and statuses you want to analyze.
         2. In the export options, you **must** select **'Show entry dates'** from the Report List dropdown. This is what creates the `-> Status` columns that this dashboard needs to calculate flow metrics.
         3. It is recommended to **exclude** the 'Summary' or 'Title' field. These fields are not used and can slow down the upload.
-        4. 🚨 **Important:** Do not include any columns that contain Personally Identifiable Information (PII) or other sensitive data in your export.
+        4. **Important:** Do not include any columns that contain Personally Identifiable Information (PII) or other sensitive data in your export.
         """)
 
     st.header("🔒 Data Security & Privacy")
