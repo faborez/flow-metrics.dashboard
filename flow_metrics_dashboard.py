@@ -198,7 +198,7 @@ class ChartGenerator:
                 hovertemplate=ChartConfig.CYCLE_TIME_HOVER
             ))
         
-        fig.update_layout(title="Cycle Time Scatterplot", xaxis_title="Completed Date", yaxis_title="Cycle Time (Days)", height=600, legend_title="Work Type")
+        fig.update_layout(title="Cycle Time Scatterplot", xaxis_title="Completed Date", yaxis_title="Cycle Time (Days)", height=900, legend_title="Work Type")
         
         for p, color in Config.PERCENTILE_COLORS.items():
             if percentile_settings.get(f"show_{p}th", True):
@@ -244,7 +244,7 @@ class ChartGenerator:
             title="Aggregated Cycle Time Bubble Chart",
             xaxis_title="Completed Date",
             yaxis_title="Cycle Time (Days)",
-            height=600
+            height=900
         )
 
         for p, color in Config.PERCENTILE_COLORS.items():
@@ -263,7 +263,7 @@ class ChartGenerator:
         if df_completed.empty:
             return None
 
-        freq_map = {'Weekly': 'W-MON', 'Monthly': 'MS'}
+        freq_map = {'Weekly': 'W-MON', 'Monthly': 'M'}
         df_completed['Period'] = df_completed['Completed date'].dt.to_period(freq_map[interval]).dt.start_time
 
         fig = px.box(
@@ -274,13 +274,12 @@ class ChartGenerator:
             labels={'Period': interval, 'Cycle time': 'Cycle Time (Days)'},
             points='all'
         )
-        fig.update_layout(height=600)
+        fig.update_layout(height=900)
         
         for p, color in Config.PERCENTILE_COLORS.items():
             if percentile_settings.get(f"show_{p}th", True):
                 y_value = np.percentile(df_completed["Cycle time"], p)
                 hover_text = f"<b>{p}th Percentile</b><br>Value: {int(y_value)} days<br><i>{p}% of items finish in this time or less.</i>"
-                # For box plots, we add a simple line across the whole chart
                 fig.add_hline(y=y_value, line_dash="dash", line_color=color, annotation_text=f"{p}th: {int(y_value)}d", annotation_position="top left")
                 
         return fig
@@ -300,7 +299,7 @@ class ChartGenerator:
             labels={'Cycle time': 'Cycle Time (Days)', 'count': 'Number of Work Items'},
             color_discrete_sequence=['#3B82F6']
         )
-        fig.update_layout(bargap=0.1, yaxis_title="Number of Work Items")
+        fig.update_layout(bargap=0.1, yaxis_title="Number of Work Items", height=600)
 
         for p, color in Config.PERCENTILE_COLORS.items():
             if percentile_settings.get(f"show_{p}th", True):
@@ -360,6 +359,7 @@ class ChartGenerator:
         fig.update_layout(
             yaxis_title="Average Time (Days)", 
             font=dict(size=14),
+            height=600,
             yaxis_range=[0, chart_df['Average Time (Days)'].max() * 1.15]
         )
         return fig, chart_df
@@ -409,7 +409,7 @@ class ChartGenerator:
         fig.update_layout(
             title="Work Item Age Chart",
             yaxis_title="<b>Age (Calendar Days)</b>",
-            height=600, legend_title="Work Type",
+            height=900, legend_title="Work Type",
             xaxis=dict(
                 title_text="", 
                 tickvals=list(status_map.values()),
@@ -502,6 +502,7 @@ class ChartGenerator:
             hovertemplate=ChartConfig.WIP_CHART_HOVER
         )
         
+        fig.update_layout(height=600)
         ChartGenerator._add_trend_line(fig, wip_over_time)
         return fig
 
@@ -580,7 +581,7 @@ class ChartGenerator:
             customdata=agg_df[['Period_End_Formatted', 'Details']].values
         )
         if not agg_df.empty:
-            fig.update_layout(yaxis_range=[0, agg_df['Throughput'].max() * 1.15], xaxis_title="Period")
+            fig.update_layout(height=600, yaxis_range=[0, agg_df['Throughput'].max() * 1.15], xaxis_title="Period")
             
         return fig
     
@@ -649,7 +650,7 @@ class ChartGenerator:
         fig.update_layout(
             title=f"Forecast: How Many Items in the Next {forecast_days} Days?",
             xaxis_title="Number of Items Completed", yaxis_title="Frequency",
-            bargap=0.1, yaxis_range=[0, counts.max() * 1.20]
+            bargap=0.1, yaxis_range=[0, counts.max() * 1.20], height=600
         )
 
         summary_text = f"**Forecast Summary (for next {forecast_days} days):**"
@@ -703,7 +704,7 @@ class ChartGenerator:
             title=f"Forecast: When Will We Finish {items_to_complete} Items?",
             xaxis_title=f"Days from {start_date.strftime('%d %b, %Y')} to Completion", 
             yaxis_title="Frequency (Number of Simulations)", 
-            bargap=0.5
+            bargap=0.5, height=600
         )
 
         percentile_dates = {}
@@ -988,15 +989,12 @@ class Dashboard:
         st.header("Cycle Time Analysis")
         
         status_options = ["None"] + list(self.status_mapping.keys())
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
 
         with col1:
             self.selections["start_status"] = st.selectbox("Starting Status", status_options, key="cycle_time_start")
         with col2:
             self.selections["completed_status"] = st.selectbox("Done Status", status_options, key="cycle_time_end")
-        
-        with col3:
-            self.selections["box_plot_interval"] = st.selectbox("Box Plot Grouping", ["Weekly", "Monthly"], index=0)
         
         self.selections["start_col"] = self.status_mapping.get(self.selections["start_status"])
         self.selections["completed_col"] = self.status_mapping.get(self.selections["completed_status"])
@@ -1038,6 +1036,7 @@ class Dashboard:
             else: st.warning("⚠️ No items to display in the Bubble Chart.")
         with ct_tabs[2]:
             st.subheader("Cycle Time Distribution Over Time")
+            self.selections["box_plot_interval"] = st.selectbox("Grouping Interval", ["Weekly", "Monthly"], index=0, key="box_interval")
             chart = ChartGenerator.create_cycle_time_box_plot(self.filtered_df, self.selections["box_plot_interval"], self.selections["percentiles"])
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("⚠️ No items to display in the Box Plot.")
@@ -1068,7 +1067,7 @@ class Dashboard:
     def _display_work_item_age_chart(self):
         """Displays the Work Item Age chart and its controls."""
         st.header("Work Item Age Analysis")
-        st.markdown("This chart shows the age of your current 'in progress' items. The age of each item is calculated from its entry into the selected 'Start Status'.")
+        st.markdown("This chart shows the age of your current 'in progress' items, calculated from their entry into the selected 'Start Status'.")
         
         status_options = ["None"] + list(self.status_mapping.keys())
         sensible_done_options = [s for s in status_options if s.lower() == 'done']
