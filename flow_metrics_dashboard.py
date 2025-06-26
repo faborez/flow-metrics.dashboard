@@ -55,7 +55,8 @@ class ChartConfig:
         "<b>Items:</b> %{marker.size}<br>"
         "<b>Cycle Time:</b> %{y} days<br>"
         "<b>Completed Date:</b> %{x|%d/%m/%Y}<br>"
-        "<b>Keys:</b><br>%{customdata[0]}<extra></extra>"
+        "<b>Breakdown:</b><br>%{customdata[0]}<br>"
+        "<b>Keys:</b><br>%{customdata[1]}<extra></extra>"
     )
     AGE_CHART_HOVER = (
         "%{customdata[0]}<br><b>Work type:</b> %{customdata[1]}<br><b>Status:</b> %{customdata[2]}<br>"
@@ -212,13 +213,17 @@ class ChartGenerator:
     @st.cache_data
     def create_cycle_time_bubble_chart(df: DataFrame, percentile_settings: Dict[str, bool]) -> Optional[Figure]:
         """Creates an aggregated bubble chart for cycle times."""
-        completed_df = df.dropna(subset=['Completed date', 'Cycle time'])
+        completed_df = df.dropna(subset=['Completed date', 'Cycle time', 'Work type'])
         if completed_df.empty:
             return None
 
+        def format_breakdown(series):
+            return '<br>'.join(f"{name}: {count}" for name, count in series.value_counts().items())
+
         agg_df = completed_df.groupby(['Completed date', 'Cycle time']).agg(
             item_count=('Key', 'size'),
-            keys=('Key', lambda x: '<br>'.join(x))
+            keys=('Key', lambda x: '<br>'.join(x)),
+            breakdown=('Work type', format_breakdown)
         ).reset_index()
 
         fig = go.Figure(data=[go.Scatter(
@@ -236,7 +241,7 @@ class ChartGenerator:
                 color='#3B82F6',
                 opacity=0.7
             ),
-            customdata=agg_df[['keys']],
+            customdata=agg_df[['breakdown', 'keys']],
             hovertemplate=ChartConfig.BUBBLE_CHART_HOVER
         )])
 
