@@ -316,7 +316,7 @@ class ChartGenerator:
     def create_time_in_status_chart(df: DataFrame, status_cols: List[str]) -> Tuple[Optional[Figure], Optional[DataFrame]]:
         """Calculates and creates a bar chart of the average time spent in each status."""
         
-        if len(status_cols) < 2:
+        if len(status_cols) < 2 or df.empty:
             return None, None
 
         all_durations = []
@@ -906,7 +906,8 @@ class Dashboard:
                 max_value=max_date if pd.notna(max_date) else None,
                 value=end_val
             )
-
+            
+        self.selections["exclude_long_cycle_times"] = st.sidebar.checkbox("Exclude cycle time > 365 days", value=False)
         st.sidebar.caption("Note: Date Range does not apply to the Work Item Age chart.")
 
         st.sidebar.markdown("#### Optional Filters")
@@ -940,6 +941,10 @@ class Dashboard:
         """Applies all selected filters to the DataFrame."""
         df = source_df.copy()
         
+        if self.selections.get("exclude_long_cycle_times"):
+            if 'Cycle time' in df.columns:
+                df = df[df['Cycle time'] <= 365]
+
         if "All" not in self.selections.get("work_types", ["All"]):
             df = df[df["Work type"].isin(self.selections["work_types"])]
         
@@ -989,12 +994,15 @@ class Dashboard:
         st.header("Cycle Time Analysis")
         
         status_options = ["None"] + list(self.status_mapping.keys())
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
 
         with col1:
             self.selections["start_status"] = st.selectbox("Starting Status", status_options, key="cycle_time_start")
         with col2:
             self.selections["completed_status"] = st.selectbox("Done Status", status_options, key="cycle_time_end")
+        
+        with col3:
+            self.selections["box_plot_interval"] = st.selectbox("Box Plot Grouping", ["Weekly", "Monthly"], index=0)
         
         self.selections["start_col"] = self.status_mapping.get(self.selections["start_status"])
         self.selections["completed_col"] = self.status_mapping.get(self.selections["completed_status"])
@@ -1036,7 +1044,6 @@ class Dashboard:
             else: st.warning("⚠️ No items to display in the Bubble Chart.")
         with ct_tabs[2]:
             st.subheader("Cycle Time Distribution Over Time")
-            self.selections["box_plot_interval"] = st.selectbox("Grouping Interval", ["Weekly", "Monthly"], index=0, key="box_interval")
             chart = ChartGenerator.create_cycle_time_box_plot(self.filtered_df, self.selections["box_plot_interval"], self.selections["percentiles"])
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("⚠️ No items to display in the Box Plot.")
@@ -1047,7 +1054,7 @@ class Dashboard:
         with ct_tabs[4]:
             st.markdown("This chart shows the average time items spend in each status column of your raw data export.")
             status_cols = list(self.status_mapping.values())
-            chart, chart_data = ChartGenerator.create_time_in_status_chart(self.raw_df, status_cols)
+            chart, chart_data = ChartGenerator.create_time_in_status_chart(self.filtered_df, status_cols)
             if chart: 
                 st.plotly_chart(chart, use_container_width=True)
                 
@@ -1076,13 +1083,13 @@ class Dashboard:
         with st.expander("Work Item Age Chart Controls", expanded=True):
             col1, col2, col3 = st.columns(3)
             with col1:
-                self.selections["age_start_status"] = st.selectbox("Start Status (for X-Axis & Age Calculation)", status_options, key="age_start", index=1 if len(status_options) > 1 else 0)
+                self.selections["age_start_status"] = st.selectbox("Start Status", status_options, key="age_start", index=1 if len(status_options) > 1 else 0, help="Defines the start of the X-axis and the point from which item age is calculated.")
             with col2:
                 try:
                     default_end_index = status_options.index("In Testing")
                 except ValueError:
                     default_end_index = len(status_options) - 2 if len(status_options) > 2 else 0
-                self.selections["age_end_status"] = st.selectbox("End Status (for X-Axis)", status_options, key="age_end", index=default_end_index)
+                self.selections["age_end_status"] = st.selectbox("End Status", status_options, key="age_end", index=default_end_index, help="Defines the end of the X-axis.")
             with col3:
                 self.selections["age_true_final_status"] = st.selectbox("Select the true 'Done' status", status_options, key="age_final", index=default_done_index, help="Select the status that marks an item as completely finished for your workflow.")
 
