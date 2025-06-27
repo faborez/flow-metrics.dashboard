@@ -95,6 +95,12 @@ class ChartConfig:
         "<b>Breakdown:</b><br>%{customdata[0]}<br><br>"
         "<b>Keys:</b><br>%{customdata[1]}<extra></extra>"
     )
+    STORY_POINT_HOVER = (
+        "<b>Key:</b> %{customdata[0]}<br>"
+        "<b>Cycle time:</b> %{y:.0f} days<br>"
+        "<b>Story Point:</b> %{x}<br>"
+        "<b>Date completed:</b> %{customdata[1]}<extra></extra>"
+    )
     AGE_CHART_HOVER = (
         "%{customdata[0]}<br><b>Work type:</b> %{customdata[1]}<br><b>Status:</b> %{customdata[2]}<br>"
         "<b>Start:</b> %{customdata[3]}<br><b>Age:</b> %{customdata[4]} days<extra></extra>"
@@ -485,6 +491,47 @@ class ChartGenerator:
         
         return fig
 
+    @staticmethod
+    @st.cache_data
+    def create_story_point_chart(df: DataFrame, percentile_settings: Dict[str, bool], is_color_blind_mode: bool) -> Optional[Figure]:
+        """Creates a scatter plot of cycle time vs. story points."""
+        sp_col_name = None
+        if 'Story Points' in df.columns:
+            sp_col_name = 'Story Points'
+        elif 'Story point estimate' in df.columns:
+            sp_col_name = 'Story point estimate'
+        
+        if not sp_col_name:
+            return None
+
+        df_sp = df.dropna(subset=['Cycle time', sp_col_name]).copy()
+        df_sp = df_sp[pd.to_numeric(df_sp[sp_col_name], errors='coerce').notna()]
+        df_sp[sp_col_name] = pd.to_numeric(df_sp[sp_col_name])
+
+        if df_sp.empty:
+            return None
+
+        chart_df = ChartGenerator._prepare_chart_data(df_sp, ['Key', 'Work type', 'Completed date', 'Start date', 'Cycle time'])
+        
+        jitter_strength = 0.4
+        chart_df['Cycle_time_jittered'] = chart_df['Cycle time'] + np.random.uniform(-jitter_strength, jitter_strength, size=len(chart_df))
+
+        work_type_colors = ColorManager.get_work_type_colors(is_color_blind_mode)
+        fig = go.Figure()
+        for work_type in ChartGenerator._order_work_types(chart_df):
+            df_type = chart_df[chart_df['Work type'] == work_type]
+            fig.add_trace(go.Scatter(
+                x=df_type[sp_col_name], y=df_type['Cycle_time_jittered'],
+                mode='markers', name=work_type,
+                marker=dict(color=work_type_colors.get(work_type, Config.DEFAULT_COLOR), size=8, opacity=0.7),
+                customdata=df_type[['Key', 'Completed_date_formatted']],
+                hovertemplate=ChartConfig.STORY_POINT_HOVER
+            ))
+        
+        fig.update_layout(title="Story Point Correlation", xaxis_title="Story Points", yaxis_title="Cycle Time (Days)", height=900, legend_title="Work Type")
+        
+        return fig
+    
     @staticmethod
     def _add_percentile_lines(fig: go.Figure, df: pd.DataFrame, y_col: str, x_data, percentile_settings: Dict[str, bool], is_color_blind_mode: bool, add_annotation: bool = False):
         """Helper to add percentile lines to a chart."""
@@ -1052,13 +1099,26 @@ class Dashboard:
 
     def _display_charts(self):
         """Displays the main chart area with tabs."""
-        main_tabs = st.tabs(["📈 Cycle Time", "📊 Work Item Age", "🔄 WIP Trend", "📊 Throughput", "🔮 Throughput Forecast"])
+        tab_list = ["📈 Cycle Time", "📊 Work Item Age", "🔄 WIP Trend", "📊 Throughput", "🔮 Throughput Forecast"]
+        
+        sp_col_name = None
+        if 'Story Points' in self.raw_df.columns:
+            sp_col_name = 'Story Points'
+        elif 'Story point estimate' in self.raw_df.columns:
+            sp_col_name = 'Story point estimate'
+        
+        if sp_col_name and pd.to_numeric(self.raw_df[sp_col_name], errors='coerce').notna().any():
+            tab_list.append("📈 Story Point Analysis")
+
+        main_tabs = st.tabs(tab_list)
         
         with main_tabs[0]: self._display_cycle_time_charts()
         with main_tabs[1]: self._display_work_item_age_chart()
         with main_tabs[2]: self._display_wip_chart()
         with main_tabs[3]: self._display_throughput_chart()
         with main_tabs[4]: self._display_forecast_charts()
+        if len(main_tabs) > 5:
+            with main_tabs[5]: self._display_story_point_chart()
 
     def _display_cycle_time_charts(self):
         """Displays the Cycle Time charts and statistics."""
@@ -1141,6 +1201,38 @@ class Dashboard:
                         )
             else: 
                 st.warning("⚠️ Not enough data to calculate time in status.")
+
+    def _display_story_point_chart(self):
+        """Displays the Story Point Correlation chart and its controls."""
+        st.header("Story Point Analysis")
+        
+        st.markdown("This chart plots the cycle time of completed items against their story point estimates.")
+        
+        status_options = ["None"] + list(self.status_mapping.keys())
+        col1, col2 = st.columns(2)
+
+        with col1:
+            self.selections["sp_start_status"] = st.selectbox("Starting Status", status_options, key="sp_start")
+        with col2:
+            self.selections["sp_end_status"] = st.selectbox("Done Status", status_options, key="sp_end", help="Please select the status that represents your Definition of Done.")
+        
+        self.selections["sp_start_col"] = self.status_mapping.get(self.selections["sp_start_status"])
+        self.selections["sp_end_col"] = self.status_mapping.get(self.selections["sp_end_status"])
+        
+        st.divider()
+
+        if not self.selections["sp_start_col"] or not self.selections["sp_end_col"]:
+            st.info("ℹ️ Please select a 'Starting Status' and 'Done Status' above to generate the chart.")
+            return
+            
+        sp_processed_df = DataProcessor.process_dates(self.raw_df, self.selections["sp_start_col"], self.selections["sp_end_col"])
+        sp_filtered_df = self._apply_all_filters(sp_processed_df, apply_date_filter=True)
+        
+        chart = ChartGenerator.create_story_point_chart(sp_filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
+        if chart:
+            st.plotly_chart(chart, use_container_width=True)
+        else:
+            st.warning("⚠️ No completed items with story points found for the selected criteria.")
 
     def _display_work_item_age_chart(self):
         """Displays the Work Item Age chart and its controls."""
