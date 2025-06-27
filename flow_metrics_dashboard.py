@@ -1297,7 +1297,7 @@ class Dashboard:
                 forecast_start_date = st.date_input("Forecast start date", value=datetime.now().date(), key="when_forecast_start")
 
             st.divider()
-            
+
             chart, stats = ChartGenerator.create_when_forecast_chart(forecast_source_df, items_to_complete, forecast_start_date, throughput_status_col, scope_complexity, team_focus)
             
             if stats:
@@ -1319,7 +1319,7 @@ class Dashboard:
                     50: "#f8d7da",
                     70: "#fff3cd",
                     85: "#d4edda",
-                    95: "#a3d1b0" 
+                    95: "#a3bde0" 
                 }
                 text_color = "#212529"
 
