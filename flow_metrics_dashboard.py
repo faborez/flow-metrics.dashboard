@@ -18,11 +18,11 @@ st.set_page_config(page_title="Flow Metrics Dashboard", layout="wide")
 
 class ColorManager:
     """Manages color palettes for the dashboard."""
-    DEFAULT_COLORS = {
+    DEFAULT_WORK_TYPE_COLORS = {
         'Epic': '#8B5CF6', 'Story': '#10B981', 'Task': '#3B82F6',
         'Bug': '#EF4444', 'Spike': '#F97316'
     }
-    COLOR_BLIND_FRIENDLY_COLORS = {
+    COLOR_BLIND_FRIENDLY_WORK_TYPE_COLORS = {
         'Epic': '#EE7733', 'Story': '#0077BB', 'Task': '#33BBEE',
         'Bug': '#EE3377', 'Spike': '#CC3311'
     }
@@ -33,16 +33,30 @@ class ColorManager:
         85: '#009E73', # Bluish Green
         95: '#0072B2'  # Blue
     }
+    DEFAULT_FORECAST_BOX_COLORS = {
+        50: "#f8d7da", 70: "#fff3cd", 85: "#d4edda", 95: "#a3bde0" 
+    }
+    COLOR_BLIND_FRIENDLY_FORECAST_BOX_COLORS = {
+        50: "#FADADD", # Pastel Pink/Red
+        70: "#FFF8DC", # Pastel Yellow/Cornsilk
+        85: "#D4E6F1", # Pastel Blue
+        95: "#D1E8E2"  # Pastel Teal/Green
+    }
     
     @staticmethod
     def get_work_type_colors(is_color_blind_mode: bool) -> Dict[str, str]:
         """Returns the appropriate color palette for work item types."""
-        return ColorManager.COLOR_BLIND_FRIENDLY_COLORS if is_color_blind_mode else ColorManager.DEFAULT_COLORS
+        return ColorManager.COLOR_BLIND_FRIENDLY_WORK_TYPE_COLORS if is_color_blind_mode else ColorManager.DEFAULT_WORK_TYPE_COLORS
 
     @staticmethod
     def get_percentile_colors(is_color_blind_mode: bool) -> Dict[int, str]:
         """Returns the appropriate color palette for percentile lines."""
         return ColorManager.COLOR_BLIND_FRIENDLY_PERCENTILE_COLORS if is_color_blind_mode else ColorManager.DEFAULT_PERCENTILE_COLORS
+
+    @staticmethod
+    def get_forecast_box_colors(is_color_blind_mode: bool) -> Dict[int, str]:
+        """Returns the appropriate color palette for forecast likelihood boxes."""
+        return ColorManager.COLOR_BLIND_FRIENDLY_FORECAST_BOX_COLORS if is_color_blind_mode else ColorManager.DEFAULT_FORECAST_BOX_COLORS
 
 class Config:
     """Centralized configuration for the dashboard."""
@@ -128,7 +142,6 @@ class DataProcessor:
                 df = pd.read_csv(uploaded_file, keep_default_na=False, encoding=encoding)
                 df = df.dropna(how='all')
                 
-                # Check for 'Issue type' (lowercase t) and rename it to 'Work type'
                 if 'Issue type' in df.columns:
                     df = df.rename(columns={'Issue type': 'Work type'})
                 
@@ -1356,18 +1369,15 @@ class Dashboard:
                 </style>
                 """, unsafe_allow_html=True)
 
-                percentile_colors = {
-                    50: "#f8d7da",
-                    70: "#fff3cd",
-                    85: "#d4edda",
-                    95: "#a3bde0" 
-                }
-                text_color = "#212529"
+                # Use the ColorManager to get the appropriate palette
+                is_color_blind = self.selections.get('color_blind_mode', False)
+                box_colors = ColorManager.get_forecast_box_colors(is_color_blind)
+                text_color = "#212529" # Dark text for light pastel backgrounds
 
                 cols = st.columns(len(stats))
                 for i, (p, date_val) in enumerate(stats.items()):
                     with cols[i]:
-                        background_color = percentile_colors.get(p, '#e9ecef')
+                        background_color = box_colors.get(p, '#e9ecef')
                         st.markdown(f"""
                         <div class="forecast-box" style="background-color: {background_color}; color: {text_color};">
                             <div class="forecast-label">{p}% Likelihood</div>
