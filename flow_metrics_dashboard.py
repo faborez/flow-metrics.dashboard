@@ -54,8 +54,8 @@ class ChartConfig:
     BUBBLE_CHART_HOVER = (
         "<b>Items:</b> %{marker.size}<br>"
         "<b>Cycle Time:</b> %{y} days<br>"
-        "<b>Completed Date:</b> %{x|%d/%m/%Y}<br>"
-        "<b>Breakdown:</b><br>%{customdata[0]}<br>"
+        "<b>Completed Date:</b> %{x|%d/%m/%Y}<br><br>"
+        "<b>Breakdown:</b><br>%{customdata[0]}<br><br>"
         "<b>Keys:</b><br>%{customdata[1]}<extra></extra>"
     )
     AGE_CHART_HOVER = (
@@ -201,11 +201,7 @@ class ChartGenerator:
         
         fig.update_layout(title="Cycle Time Scatterplot", xaxis_title="Completed Date", yaxis_title="Cycle Time (Days)", height=900, legend_title="Work Type")
         
-        for p, color in Config.PERCENTILE_COLORS.items():
-            if percentile_settings.get(f"show_{p}th", True):
-                y_value = np.percentile(chart_df["Cycle time"], p)
-                hover_text = f"<b>{p}th Percentile</b><br>Value: {int(y_value)} days<br><i>{p}% of items finish in this time or less.</i>"
-                ChartGenerator._add_hoverable_line(fig, y_value, chart_df["Completed date"], hover_text, color, f"{p}th: {int(y_value)}d")
+        ChartGenerator._add_percentile_lines(fig, chart_df, 'Cycle time', chart_df["Completed date"], percentile_settings)
         
         return fig
 
@@ -252,11 +248,7 @@ class ChartGenerator:
             height=900
         )
 
-        for p, color in Config.PERCENTILE_COLORS.items():
-            if percentile_settings.get(f"show_{p}th", True):
-                y_value = np.percentile(completed_df["Cycle time"], p)
-                hover_text = f"<b>{p}th Percentile</b><br>Value: {int(y_value)} days<br><i>{p}% of items finish in this time or less.</i>"
-                ChartGenerator._add_hoverable_line(fig, y_value, agg_df["Completed date"], hover_text, color, f"{p}th: {int(y_value)}d")
+        ChartGenerator._add_percentile_lines(fig, completed_df, 'Cycle time', agg_df["Completed date"], percentile_settings)
                 
         return fig
     
@@ -281,11 +273,7 @@ class ChartGenerator:
         )
         fig.update_layout(height=900)
         
-        for p, color in Config.PERCENTILE_COLORS.items():
-            if percentile_settings.get(f"show_{p}th", True):
-                y_value = np.percentile(df_completed["Cycle time"], p)
-                hover_text = f"<b>{p}th Percentile</b><br>Value: {int(y_value)} days<br><i>{p}% of items finish in this time or less.</i>"
-                fig.add_hline(y=y_value, line_dash="dash", line_color=color, annotation_text=f"{p}th: {int(y_value)}d", annotation_position="top left")
+        ChartGenerator._add_percentile_lines(fig, df_completed, 'Cycle time', df_completed["Period"], percentile_settings, add_annotation=True)
                 
         return fig
 
@@ -447,14 +435,23 @@ class ChartGenerator:
 
         if cycle_time_percentiles:
             x_range_for_lines = [-0.5, len(status_order) - 0.5]
-            for p_int_str, p_val in cycle_time_percentiles.items():
-                if p_int_str.startswith('p'):
-                    p = int(p_int_str[1:])
-                    if percentile_settings.get(f"show_{p}th", True):
-                        hover_text = f"<b>{p}th Percentile (from Cycle Time)</b><br>Value: {p_val} days<br><i>Items above this line are aging longer than {p}% of past items.</i>"
-                        ChartGenerator._add_hoverable_line(fig, p_val, x_range_for_lines, hover_text, Config.PERCENTILE_COLORS.get(p), f"{p}th: {p_val}d")
+            ChartGenerator._add_percentile_lines(fig, chart_df, 'Age', x_range_for_lines, percentile_settings)
         
         return fig
+
+    @staticmethod
+    def _add_percentile_lines(fig: go.Figure, df: pd.DataFrame, y_col: str, x_data, percentile_settings: Dict[str, bool], add_annotation: bool = False):
+        """Helper to add percentile lines to a chart."""
+        if df.empty:
+            return
+        for p, color in Config.PERCENTILE_COLORS.items():
+            if percentile_settings.get(f"show_{p}th", True):
+                y_value = np.percentile(df[y_col], p)
+                hover_text = f"<b>{p}th Percentile</b><br>Value: {int(y_value)} days<br><i>{p}% of items finish in this time or less.</i>"
+                if add_annotation:
+                    fig.add_hline(y=y_value, line_dash="dash", line_color=color, annotation_text=f"{p}th: {int(y_value)}d", annotation_position="top left")
+                else:
+                    ChartGenerator._add_hoverable_line(fig, y_value, x_data, hover_text, color, f"{p}th: {int(y_value)}d")
 
     @staticmethod
     def _add_hoverable_line(fig, y_value, x_data, hover_text, color, annotation_text):
@@ -591,7 +588,7 @@ class ChartGenerator:
         return fig
     
     @staticmethod
-    @st.cache_data
+    @st.cache_data(show_spinner="Running simulations...")
     def _get_recent_weekly_throughput(df: DataFrame, status_col: str) -> Tuple[Optional[pd.Series], Optional[np.ndarray]]:
         """Gets recent weekly throughput and calculates sampling weights."""
         if not status_col:
@@ -628,25 +625,24 @@ class ChartGenerator:
         return weekly_throughput, normalized_weights
 
     @staticmethod
-    @st.cache_data
+    @st.cache_data(show_spinner="Running 'How Many' simulations...")
     def create_how_many_forecast_chart(df: DataFrame, forecast_days: int, throughput_status_col: str) -> Optional[Figure]:
         """Prepares data and runs the 'How Many' simulation to create a forecast chart."""
         weekly_throughput, normalized_weights = ChartGenerator._get_recent_weekly_throughput(df, throughput_status_col)
         
         if weekly_throughput is None:
             return None
+        
+        num_weeks = forecast_days / 7.0
+        num_full_weeks = int(num_weeks)
+        fractional_week_multiplier = num_weeks % 1
+        
+        simulations = np.random.choice(weekly_throughput, size=(Config.FORECASTING_SIMULATIONS, num_full_weeks), replace=True, p=normalized_weights)
+        forecast_counts = simulations.sum(axis=1)
 
-        with st.spinner(f"Running {Config.FORECASTING_SIMULATIONS} weighted simulations..."):
-            num_weeks = forecast_days / 7.0
-            num_full_weeks = int(num_weeks)
-            fractional_week_multiplier = num_weeks % 1
-            
-            simulations = np.random.choice(weekly_throughput, size=(Config.FORECASTING_SIMULATIONS, num_full_weeks), replace=True, p=normalized_weights)
-            forecast_counts = simulations.sum(axis=1)
-
-            if fractional_week_multiplier > 0:
-                last_week_sim = np.random.choice(weekly_throughput, size=Config.FORECASTING_SIMULATIONS, replace=True, p=normalized_weights)
-                forecast_counts += (last_week_sim * fractional_week_multiplier).astype(int)
+        if fractional_week_multiplier > 0:
+            last_week_sim = np.random.choice(weekly_throughput, size=Config.FORECASTING_SIMULATIONS, replace=True, p=normalized_weights)
+            forecast_counts += (last_week_sim * fractional_week_multiplier).astype(int)
 
         counts, bin_edges = np.histogram(forecast_counts, bins=30, range=(forecast_counts.min(), forecast_counts.max()))
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
@@ -674,30 +670,45 @@ class ChartGenerator:
         return fig
 
     @staticmethod
-    @st.cache_data
-    def create_when_forecast_chart(df: DataFrame, items_to_complete: int, start_date: datetime.date, throughput_status_col: str) -> Tuple[Optional[Figure], Optional[Dict[int, datetime]]]:
+    @st.cache_data(show_spinner="Running 'When' simulations...")
+    def create_when_forecast_chart(df: DataFrame, items_to_complete: int, start_date: datetime.date, throughput_status_col: str, scope_complexity: str, team_focus: str) -> Tuple[Optional[Figure], Optional[Dict[int, datetime]]]:
         """Creates the 'When' forecast chart by running a direct simulation."""
         weekly_throughput, normalized_weights = ChartGenerator._get_recent_weekly_throughput(df, throughput_status_col)
 
         if weekly_throughput is None or normalized_weights is None or weekly_throughput.mean() == 0:
             return None, None
 
-        with st.spinner(f"Running {Config.FORECASTING_SIMULATIONS} 'when' simulations for {items_to_complete} items..."):
-            completion_weeks_data = []
-            for _ in range(Config.FORECASTING_SIMULATIONS):
-                items_done = 0
-                weeks_elapsed = 0
-                timeout_weeks = max(300, (items_to_complete / weekly_throughput.mean()) * 20 if weekly_throughput.mean() > 0 else 300)
+        complexity_factors = {
+            'Clear and understood': 1.0,
+            'Somewhat understood': 1.25,
+            'Not really understood yet': 1.50,
+            'Very unclear or not understood': 2.00
+        }
+        adjusted_items = int(items_to_complete * complexity_factors.get(scope_complexity, 1.0))
 
-                while items_done < items_to_complete:
-                    if weeks_elapsed > timeout_weeks:
-                        weeks_elapsed = -1 
-                        break
-                    items_done += np.random.choice(weekly_throughput, p=normalized_weights)
-                    weeks_elapsed += 1
-                
-                if weeks_elapsed != -1:
-                    completion_weeks_data.append(weeks_elapsed)
+        focus_factors = {
+            '100% (only this work)': 1.0,
+            '75% (mostly this work)': 0.75,
+            '50% (half of this work)': 0.50,
+            '25% (some of this work)': 0.25
+        }
+        adjusted_throughput = weekly_throughput * focus_factors.get(team_focus, 1.0)
+        
+        completion_weeks_data = []
+        for _ in range(Config.FORECASTING_SIMULATIONS):
+            items_done = 0
+            weeks_elapsed = 0
+            timeout_weeks = max(300, (adjusted_items / adjusted_throughput.mean()) * 20 if adjusted_throughput.mean() > 0 else 300)
+
+            while items_done < adjusted_items:
+                if weeks_elapsed > timeout_weeks:
+                    weeks_elapsed = -1 
+                    break
+                items_done += np.random.choice(adjusted_throughput, p=normalized_weights)
+                weeks_elapsed += 1
+            
+            if weeks_elapsed != -1:
+                completion_weeks_data.append(weeks_elapsed)
 
         if not completion_weeks_data: return None, None
         
@@ -706,7 +717,7 @@ class ChartGenerator:
 
         fig = go.Figure(data=[go.Bar(name='Simulations', x=value_counts.index, y=value_counts.values)])
         fig.update_layout(
-            title=f"Forecast: When Will We Finish {items_to_complete} Items?",
+            title="Forecast: Completion Date Distribution",
             xaxis_title=f"Days from {start_date.strftime('%d %b, %Y')} to Completion", 
             yaxis_title="Frequency (Number of Simulations)", 
             bargap=0.5, height=600
@@ -1266,38 +1277,60 @@ class Dashboard:
             else: forecast_days = 30
             
             chart = ChartGenerator.create_how_many_forecast_chart(forecast_source_df, forecast_days, throughput_status_col)
-            if chart: st.plotly_chart(chart, use_container_width=True)
-            else: st.warning("⚠️ Insufficient historical data for forecasting. Check that the selected Throughput Status has completed items.")
+            
+            if chart:
+                st.plotly_chart(chart, use_container_width=True)
+            else:
+                st.warning("⚠️ Insufficient historical data for forecasting. Check that the selected Throughput Status has completed items.")
 
         with forecast_tabs[1]:
             st.subheader("When can we expect to complete a given number of items?")
             
-            col1, col2 = st.columns(2)
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
                 items_to_complete = st.number_input("Number of items to forecast:", min_value=1, value=20, step=1, key="when_forecast_items")
             with col2:
+                scope_complexity = st.selectbox("Scope Complexity", options=['Clear and understood', 'Somewhat understood', 'Not really understood yet', 'Very unclear or not understood'], key="scope_complexity")
+            with col3:
+                team_focus = st.selectbox("Team Focus", options=['100% (only this work)', '75% (mostly this work)', '50% (half of this work)', '25% (some of this work)'], key="team_focus")
+            with col4:
                 forecast_start_date = st.date_input("Forecast start date", value=datetime.now().date(), key="when_forecast_start")
 
             st.divider()
-
-            chart, stats = ChartGenerator.create_when_forecast_chart(forecast_source_df, items_to_complete, forecast_start_date, throughput_status_col)
+            
+            chart, stats = ChartGenerator.create_when_forecast_chart(forecast_source_df, items_to_complete, forecast_start_date, throughput_status_col, scope_complexity, team_focus)
             
             if stats:
                 st.markdown("""
                 <style>
-                .forecast-metric-container { text-align: center; }
-                .forecast-metric-label { font-size: 1.1em; font-weight: bold; color: #808495; }
-                .forecast-metric-value { font-size: 2em; font-weight: bold; }
+                .forecast-box {
+                    padding: 10px;
+                    border-radius: 5px;
+                    color: white;
+                    text-align: center;
+                    margin-bottom: 10px;
+                }
+                .forecast-label { font-size: 1.1em; font-weight: bold; }
+                .forecast-value { font-size: 2em; font-weight: bold; }
                 </style>
                 """, unsafe_allow_html=True)
-                
+
+                percentile_colors = {
+                    50: "#f8d7da",
+                    70: "#fff3cd",
+                    85: "#d4edda",
+                    95: "#a3d1b0" 
+                }
+                text_color = "#212529"
+
                 cols = st.columns(len(stats))
                 for i, (p, date_val) in enumerate(stats.items()):
                     with cols[i]:
+                        background_color = percentile_colors.get(p, '#e9ecef')
                         st.markdown(f"""
-                        <div class="forecast-metric-container">
-                            <div class="forecast-metric-label">{p}% Likelihood</div>
-                            <div class="forecast-metric-value">{date_val.strftime("%d %b, %Y")}</div>
+                        <div class="forecast-box" style="background-color: {background_color}; color: {text_color};">
+                            <div class="forecast-label">{p}% Likelihood</div>
+                            <div class="forecast-value">{date_val.strftime("%d %b, %Y")}</div>
                         </div>
                         """, unsafe_allow_html=True)
 
