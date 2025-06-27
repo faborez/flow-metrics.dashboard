@@ -18,11 +18,11 @@ st.set_page_config(page_title="Flow Metrics Dashboard", layout="wide")
 
 class ColorManager:
     """Manages color palettes for the dashboard."""
-    DEFAULT_WORK_TYPE_COLORS = {
+    DEFAULT_COLORS = {
         'Epic': '#8B5CF6', 'Story': '#10B981', 'Task': '#3B82F6',
         'Bug': '#EF4444', 'Spike': '#F97316'
     }
-    COLOR_BLIND_FRIENDLY_WORK_TYPE_COLORS = {
+    COLOR_BLIND_FRIENDLY_COLORS = {
         'Epic': '#EE7733', 'Story': '#0077BB', 'Task': '#33BBEE',
         'Bug': '#EE3377', 'Spike': '#CC3311'
     }
@@ -46,7 +46,7 @@ class ColorManager:
     @staticmethod
     def get_work_type_colors(is_color_blind_mode: bool) -> Dict[str, str]:
         """Returns the appropriate color palette for work item types."""
-        return ColorManager.COLOR_BLIND_FRIENDLY_WORK_TYPE_COLORS if is_color_blind_mode else ColorManager.DEFAULT_WORK_TYPE_COLORS
+        return ColorManager.COLOR_BLIND_FRIENDLY_COLORS if is_color_blind_mode else ColorManager.DEFAULT_COLORS
 
     @staticmethod
     def get_percentile_colors(is_color_blind_mode: bool) -> Dict[int, str]:
@@ -144,9 +144,11 @@ class DataProcessor:
                 
                 if 'Issue type' in df.columns:
                     df = df.rename(columns={'Issue type': 'Work type'})
+                elif 'Issue Type' in df.columns:
+                    df = df.rename(columns={'Issue Type': 'Work type'})
                 
                 if not {'Key', 'Work type'}.issubset(df.columns):
-                    st.error("Invalid file format: CSV must include 'Key' and 'Work type' (or 'Issue type') columns.")
+                    st.error("Invalid file format: CSV must include 'Key' and 'Work type' (or 'Issue type'/'Issue Type') columns.")
                     return None
                 return df
             except UnicodeDecodeError:
@@ -1369,10 +1371,8 @@ class Dashboard:
                 </style>
                 """, unsafe_allow_html=True)
 
-                # Use the ColorManager to get the appropriate palette
-                is_color_blind = self.selections.get('color_blind_mode', False)
-                box_colors = ColorManager.get_forecast_box_colors(is_color_blind)
-                text_color = "#212529" # Dark text for light pastel backgrounds
+                box_colors = ColorManager.get_forecast_box_colors(self.selections['color_blind_mode'])
+                text_color = "#212529"
 
                 cols = st.columns(len(stats))
                 for i, (p, date_val) in enumerate(stats.items()):
