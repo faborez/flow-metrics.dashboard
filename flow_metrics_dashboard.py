@@ -16,18 +16,40 @@ import unicodedata
 # Configuration
 st.set_page_config(page_title="Flow Metrics Dashboard", layout="wide")
 
-class Config:
-    """Centralized configuration for the dashboard."""
-    WORK_TYPE_COLORS = {
+class ColorManager:
+    """Manages color palettes for the dashboard."""
+    DEFAULT_COLORS = {
         'Epic': '#8B5CF6', 'Story': '#10B981', 'Task': '#3B82F6',
         'Bug': '#EF4444', 'Spike': '#F97316'
     }
-    DEFAULT_COLOR = '#808080'
+    COLOR_BLIND_FRIENDLY_COLORS = {
+        'Epic': '#EE7733', 'Story': '#0077BB', 'Task': '#33BBEE',
+        'Bug': '#EE3377', 'Spike': '#CC3311'
+    }
+    DEFAULT_PERCENTILE_COLORS = { 50: "red", 70: "orange", 85: "green", 95: "blue" }
+    COLOR_BLIND_FRIENDLY_PERCENTILE_COLORS = {
+        50: '#E69F00', # Orange
+        70: '#56B4E9', # Sky Blue
+        85: '#009E73', # Bluish Green
+        95: '#0072B2'  # Blue
+    }
+    
+    @staticmethod
+    def get_work_type_colors(is_color_blind_mode: bool) -> Dict[str, str]:
+        """Returns the appropriate color palette for work item types."""
+        return ColorManager.COLOR_BLIND_FRIENDLY_COLORS if is_color_blind_mode else ColorManager.DEFAULT_COLORS
+
+    @staticmethod
+    def get_percentile_colors(is_color_blind_mode: bool) -> Dict[int, str]:
+        """Returns the appropriate color palette for percentile lines."""
+        return ColorManager.COLOR_BLIND_FRIENDLY_PERCENTILE_COLORS if is_color_blind_mode else ColorManager.DEFAULT_PERCENTILE_COLORS
+
+class Config:
+    """Centralized configuration for the dashboard."""
     WORK_TYPE_ORDER = ['Epic', 'Story', 'Task', 'Bug', 'Spike']
     DATE_RANGES = ["All time", "Last 30 days", "Last 60 days", "Last 90 days", "Custom"]
     
     PERCENTILES = [50, 70, 85, 95]
-    PERCENTILE_COLORS = { 50: "red", 70: "orange", 85: "green", 95: "blue" }
 
     FORECAST_LIKELIHOODS = {
         95: 5,
@@ -43,6 +65,7 @@ class Config:
         "Team": "single", "Labels": "multi", "Components": "multi",
         "High Level Estimate-DPID": "multi", "RAG-DPID": "multi"
     }
+    DEFAULT_COLOR = '#808080'
 
 class ChartConfig:
     """Centralized configuration for chart templates and layouts."""
@@ -104,8 +127,13 @@ class DataProcessor:
             try:
                 df = pd.read_csv(uploaded_file, keep_default_na=False, encoding=encoding)
                 df = df.dropna(how='all')
-                if not {'Key', 'Issue Type'}.issubset(df.columns):
-                    st.error("Invalid file format: CSV must include 'Key' and 'Issue Type' columns.")
+                
+                # Check for 'Issue type' (lowercase t) and rename it to 'Work type'
+                if 'Issue type' in df.columns:
+                    df = df.rename(columns={'Issue type': 'Work type'})
+                
+                if not {'Key', 'Work type'}.issubset(df.columns):
+                    st.error("Invalid file format: CSV must include 'Key' and 'Work type' (or 'Issue type') columns.")
                     return None
                 return df
             except UnicodeDecodeError:
@@ -118,8 +146,8 @@ class DataProcessor:
 
     @staticmethod
     def clean_data(df: DataFrame) -> DataFrame:
-        """Cleans the raw DataFrame, handling duplicates and renaming columns."""
-        df_clean = df.rename(columns={'Issue Type': 'Work type'})
+        """Cleans the raw DataFrame, handling duplicates."""
+        df_clean = df.copy()
         
         if df_clean.duplicated(subset=['Key']).any():
             duplicates = df_clean[df_clean.duplicated(subset=['Key'], keep=False)]
@@ -177,7 +205,7 @@ class ChartGenerator:
     """Generates Plotly charts for the dashboard."""
     @staticmethod
     @st.cache_data
-    def create_cycle_time_chart(df: DataFrame, percentile_settings: Dict[str, bool]) -> Optional[Figure]:
+    def create_cycle_time_chart(df: DataFrame, percentile_settings: Dict[str, bool], is_color_blind_mode: bool) -> Optional[Figure]:
         """Creates the cycle time scatterplot with vertical jitter."""
         completed_df = df.dropna(subset=['Start date', 'Completed date', 'Cycle time'])
         if completed_df.empty:
@@ -188,26 +216,27 @@ class ChartGenerator:
         jitter_strength = 0.4
         chart_df['Cycle_time_jittered'] = chart_df['Cycle time'] + np.random.uniform(-jitter_strength, jitter_strength, size=len(chart_df))
 
+        work_type_colors = ColorManager.get_work_type_colors(is_color_blind_mode)
         fig = go.Figure()
         for work_type in ChartGenerator._order_work_types(chart_df):
             df_type = chart_df[chart_df['Work type'] == work_type]
             fig.add_trace(go.Scatter(
                 x=df_type['Completed date'], y=df_type['Cycle_time_jittered'],
                 mode='markers', name=work_type,
-                marker=dict(color=Config.WORK_TYPE_COLORS.get(work_type, Config.DEFAULT_COLOR), size=8, opacity=0.7),
+                marker=dict(color=work_type_colors.get(work_type, Config.DEFAULT_COLOR), size=8, opacity=0.7),
                 customdata=df_type[['Key', 'Work type', 'Completed_date_formatted', 'Start_date_formatted', 'Cycle_time_formatted']],
                 hovertemplate=ChartConfig.CYCLE_TIME_HOVER
             ))
         
         fig.update_layout(title="Cycle Time Scatterplot", xaxis_title="Completed Date", yaxis_title="Cycle Time (Days)", height=900, legend_title="Work Type")
         
-        ChartGenerator._add_percentile_lines(fig, chart_df, 'Cycle time', chart_df["Completed date"], percentile_settings)
+        ChartGenerator._add_percentile_lines(fig, chart_df, 'Cycle time', chart_df["Completed date"], percentile_settings, is_color_blind_mode)
         
         return fig
 
     @staticmethod
     @st.cache_data
-    def create_cycle_time_bubble_chart(df: DataFrame, percentile_settings: Dict[str, bool]) -> Optional[Figure]:
+    def create_cycle_time_bubble_chart(df: DataFrame, percentile_settings: Dict[str, bool], is_color_blind_mode: bool) -> Optional[Figure]:
         """Creates an aggregated bubble chart for cycle times."""
         completed_df = df.dropna(subset=['Completed date', 'Cycle time', 'Work type'])
         if completed_df.empty:
@@ -248,13 +277,13 @@ class ChartGenerator:
             height=900
         )
 
-        ChartGenerator._add_percentile_lines(fig, completed_df, 'Cycle time', agg_df["Completed date"], percentile_settings)
+        ChartGenerator._add_percentile_lines(fig, completed_df, 'Cycle time', agg_df["Completed date"], percentile_settings, is_color_blind_mode)
                 
         return fig
     
     @staticmethod
     @st.cache_data
-    def create_cycle_time_box_plot(df: DataFrame, interval: str, percentile_settings: Dict[str, bool]) -> Optional[Figure]:
+    def create_cycle_time_box_plot(df: DataFrame, interval: str, percentile_settings: Dict[str, bool], is_color_blind_mode: bool) -> Optional[Figure]:
         """Creates a box plot of cycle times over a given interval."""
         df_completed = df.dropna(subset=['Completed date', 'Cycle time']).copy()
         if df_completed.empty:
@@ -273,14 +302,14 @@ class ChartGenerator:
         )
         fig.update_layout(height=900)
         
-        ChartGenerator._add_percentile_lines(fig, df_completed, 'Cycle time', df_completed["Period"], percentile_settings, add_annotation=True)
+        ChartGenerator._add_percentile_lines(fig, df_completed, 'Cycle time', df_completed["Period"], percentile_settings, is_color_blind_mode, add_annotation=True)
                 
         return fig
 
 
     @staticmethod
     @st.cache_data
-    def create_cycle_time_histogram(df: DataFrame, percentile_settings: Dict[str, bool]) -> Optional[Figure]:
+    def create_cycle_time_histogram(df: DataFrame, percentile_settings: Dict[str, bool], is_color_blind_mode: bool) -> Optional[Figure]:
         """Creates a histogram of cycle time distribution."""
         completed_df = df.dropna(subset=['Cycle time'])
         if completed_df.empty:
@@ -293,8 +322,9 @@ class ChartGenerator:
             color_discrete_sequence=['#3B82F6']
         )
         fig.update_layout(bargap=0.1, yaxis_title="Number of Work Items", height=600)
-
-        for p, color in Config.PERCENTILE_COLORS.items():
+        
+        percentile_colors = ColorManager.get_percentile_colors(is_color_blind_mode)
+        for p, color in percentile_colors.items():
             if percentile_settings.get(f"show_{p}th", True):
                 percentile_val = np.percentile(completed_df['Cycle time'], p)
                 fig.add_vline(
@@ -358,7 +388,7 @@ class ChartGenerator:
         return fig, chart_df
 
     @staticmethod
-    def create_work_item_age_chart(df: DataFrame, status_order: List[str], cycle_time_percentiles: Dict[str, int], percentile_settings: Dict[str, bool]) -> Optional[Figure]:
+    def create_work_item_age_chart(df: DataFrame, status_order: List[str], cycle_time_percentiles: Dict[str, int], percentile_settings: Dict[str, bool], is_color_blind_mode: bool) -> Optional[Figure]:
         """Creates the work item age chart with a column-based layout and horizontal jitter."""
         age_data = []
         for _, row in df.iterrows():
@@ -386,12 +416,13 @@ class ChartGenerator:
         chart_df.dropna(subset=['Status', 'Status_Jittered'], inplace=True)
         if chart_df.empty: return None
 
+        work_type_colors = ColorManager.get_work_type_colors(is_color_blind_mode)
         fig = go.Figure()
         for work_type in ChartGenerator._order_work_types(chart_df):
             df_type = chart_df[chart_df['Work type'] == work_type]
             fig.add_trace(go.Scatter(
                 x=df_type['Status_Jittered'], y=df_type['Age'], mode='markers', name=work_type,
-                marker=dict(color=Config.WORK_TYPE_COLORS.get(work_type, Config.DEFAULT_COLOR), size=8, opacity=0.7),
+                marker=dict(color=work_type_colors.get(work_type, Config.DEFAULT_COLOR), size=8, opacity=0.7),
                 customdata=df_type[['Key', 'Work type', 'Status', 'Start_date_formatted', 'Age_formatted']],
                 hovertemplate=ChartConfig.AGE_CHART_HOVER
             ))
@@ -435,16 +466,18 @@ class ChartGenerator:
 
         if cycle_time_percentiles:
             x_range_for_lines = [-0.5, len(status_order) - 0.5]
-            ChartGenerator._add_percentile_lines(fig, chart_df, 'Age', x_range_for_lines, percentile_settings)
+            ChartGenerator._add_percentile_lines(fig, chart_df, 'Age', x_range_for_lines, percentile_settings, is_color_blind_mode)
         
         return fig
 
     @staticmethod
-    def _add_percentile_lines(fig: go.Figure, df: pd.DataFrame, y_col: str, x_data, percentile_settings: Dict[str, bool], add_annotation: bool = False):
+    def _add_percentile_lines(fig: go.Figure, df: pd.DataFrame, y_col: str, x_data, percentile_settings: Dict[str, bool], is_color_blind_mode: bool, add_annotation: bool = False):
         """Helper to add percentile lines to a chart."""
         if df.empty:
             return
-        for p, color in Config.PERCENTILE_COLORS.items():
+        
+        percentile_colors = ColorManager.get_percentile_colors(is_color_blind_mode)
+        for p, color in percentile_colors.items():
             if percentile_settings.get(f"show_{p}th", True):
                 y_value = np.percentile(df[y_col], p)
                 hover_text = f"<b>{p}th Percentile</b><br>Value: {int(y_value)} days<br><i>{p}% of items finish in this time or less.</i>"
@@ -626,7 +659,7 @@ class ChartGenerator:
 
     @staticmethod
     @st.cache_data(show_spinner="Running 'How Many' simulations...")
-    def create_how_many_forecast_chart(df: DataFrame, forecast_days: int, throughput_status_col: str) -> Optional[Figure]:
+    def create_how_many_forecast_chart(df: DataFrame, forecast_days: int, throughput_status_col: str, is_color_blind_mode: bool) -> Optional[Figure]:
         """Prepares data and runs the 'How Many' simulation to create a forecast chart."""
         weekly_throughput, normalized_weights = ChartGenerator._get_recent_weekly_throughput(df, throughput_status_col)
         
@@ -656,9 +689,12 @@ class ChartGenerator:
 
         summary_text = f"**Forecast Summary (for next {forecast_days} days):**"
         
+        percentile_colors = ColorManager.get_percentile_colors(is_color_blind_mode)
         for likelihood, percentile in sorted(Config.FORECAST_LIKELIHOODS.items(), reverse=True):
             value = np.percentile(forecast_counts, percentile)
-            color = Config.PERCENTILE_COLORS.get(likelihood)
+            color_key = next((k for k, v in Config.FORECAST_LIKELIHOODS.items() if v == percentile), 50)
+            color = percentile_colors.get(color_key)
+
             fig.add_vline(
                 x=value, line_dash="dash", line_color=color,
                 annotation_text=f"{likelihood}%: {int(value)}",
@@ -671,7 +707,7 @@ class ChartGenerator:
 
     @staticmethod
     @st.cache_data(show_spinner="Running 'When' simulations...")
-    def create_when_forecast_chart(df: DataFrame, items_to_complete: int, start_date: datetime.date, throughput_status_col: str, scope_complexity: str, team_focus: str) -> Tuple[Optional[Figure], Optional[Dict[int, datetime]]]:
+    def create_when_forecast_chart(df: DataFrame, items_to_complete: int, start_date: datetime.date, throughput_status_col: str, scope_complexity: str, team_focus: str, is_color_blind_mode: bool) -> Tuple[Optional[Figure], Optional[Dict[int, datetime]]]:
         """Creates the 'When' forecast chart by running a direct simulation."""
         weekly_throughput, normalized_weights = ChartGenerator._get_recent_weekly_throughput(df, throughput_status_col)
 
@@ -724,11 +760,12 @@ class ChartGenerator:
         )
 
         percentile_dates = {}
+        percentile_colors = ColorManager.get_percentile_colors(is_color_blind_mode)
         for p in Config.PERCENTILES:
             days = np.percentile(completion_days_data, p)
             percentile_dates[p] = start_date + timedelta(days=int(days))
             fig.add_vline(
-                x=days, line_dash="dash", line_color=Config.PERCENTILE_COLORS.get(p),
+                x=days, line_dash="dash", line_color=percentile_colors.get(p),
                 annotation_text=f"{p}%", annotation_position="top right"
             )
         return fig, percentile_dates
@@ -938,6 +975,9 @@ class Dashboard:
 
     def _sidebar_chart_controls(self):
         """Controls for customizing individual charts."""
+        st.sidebar.markdown("### Accessibility")
+        self.selections['color_blind_mode'] = st.sidebar.checkbox("Enable Color-Blind Friendly Mode")
+
         with st.sidebar.expander("📈 Cycle Time & Age Percentiles"):
             show_percentiles = st.checkbox("Show Percentile Lines", value=True)
             self.selections["percentiles"] = {f"show_{p}th": show_percentiles for p in Config.PERCENTILES}
@@ -1049,22 +1089,22 @@ class Dashboard:
         with ct_tabs[0]:
             st.subheader("Scatter Plot")
             st.markdown("ℹ️ *A small amount of random vertical 'jitter' has been added to separate overlapping points.*")
-            chart = ChartGenerator.create_cycle_time_chart(self.filtered_df, self.selections["percentiles"])
+            chart = ChartGenerator.create_cycle_time_chart(self.filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("⚠️ No items with both start and done dates for Cycle Time scatter plot.")
         with ct_tabs[1]:
             st.subheader("Aggregated Bubble Chart")
             st.markdown("ℹ️ *Bubbles represent one or more items completed on the same day with the same cycle time.*")
-            chart = ChartGenerator.create_cycle_time_bubble_chart(self.filtered_df, self.selections["percentiles"])
+            chart = ChartGenerator.create_cycle_time_bubble_chart(self.filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("⚠️ No items to display in the Bubble Chart.")
         with ct_tabs[2]:
             st.subheader("Cycle Time Distribution Over Time")
-            chart = ChartGenerator.create_cycle_time_box_plot(self.filtered_df, self.selections["box_plot_interval"], self.selections["percentiles"])
+            chart = ChartGenerator.create_cycle_time_box_plot(self.filtered_df, self.selections["box_plot_interval"], self.selections["percentiles"], self.selections['color_blind_mode'])
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("⚠️ No items to display in the Box Plot.")
         with ct_tabs[3]:
-            chart = ChartGenerator.create_cycle_time_histogram(self.filtered_df, self.selections["percentiles"])
+            chart = ChartGenerator.create_cycle_time_histogram(self.filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("⚠️ No items to display in Cycle Time histogram.")
         with ct_tabs[4]:
@@ -1146,7 +1186,8 @@ class Dashboard:
             age_df_source,
             status_order=status_order,
             cycle_time_percentiles=cycle_stats or {},
-            percentile_settings=self.selections["percentiles"]
+            percentile_settings=self.selections["percentiles"],
+            is_color_blind_mode=self.selections['color_blind_mode']
         )
         if chart:
             st.plotly_chart(chart, use_container_width=True)
@@ -1276,7 +1317,7 @@ class Dashboard:
                 else: forecast_days = 30
             else: forecast_days = 30
             
-            chart = ChartGenerator.create_how_many_forecast_chart(forecast_source_df, forecast_days, throughput_status_col)
+            chart = ChartGenerator.create_how_many_forecast_chart(forecast_source_df, forecast_days, throughput_status_col, self.selections['color_blind_mode'])
             
             if chart:
                 st.plotly_chart(chart, use_container_width=True)
@@ -1297,8 +1338,8 @@ class Dashboard:
                 forecast_start_date = st.date_input("Forecast start date", value=datetime.now().date(), key="when_forecast_start")
 
             st.divider()
-
-            chart, stats = ChartGenerator.create_when_forecast_chart(forecast_source_df, items_to_complete, forecast_start_date, throughput_status_col, scope_complexity, team_focus)
+            
+            chart, stats = ChartGenerator.create_when_forecast_chart(forecast_source_df, items_to_complete, forecast_start_date, throughput_status_col, scope_complexity, team_focus, self.selections['color_blind_mode'])
             
             if stats:
                 st.markdown("""
