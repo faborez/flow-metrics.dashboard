@@ -661,41 +661,48 @@ class ChartGenerator:
     @st.cache_data
     def create_wip_chart(df: DataFrame, date_range: str, custom_start_date: Optional[datetime], custom_end_date: Optional[datetime]) -> Optional[Figure]:
         """Creates the WIP (Work In Progress) run chart."""
-        if df is None: return None
+        if df is None or df.empty: return None
         wip_df = df.dropna(subset=['Start date'])
-        if wip_df.empty:
-            return None
+        if wip_df.empty: return None
 
-        daily_wip_data = []
         plot_min_date = wip_df['Start date'].min()
+        latest_start = wip_df['Start date'].max()
+        latest_completion = wip_df['Completed date'].max()
+        
+        # Determine the end date for the chart's x-axis
+        plot_max_date = max(dt for dt in [latest_start, latest_completion] if pd.notna(dt))
 
-        if wip_df['Completed date'].isna().any():
-            plot_max_date = datetime.now()
-        else:
-            plot_max_date = wip_df['Completed date'].max()
+        # Ensure the date range doesn't go into the future unnecessarily
+        today = pd.to_datetime(datetime.now().date())
+        if plot_max_date > today:
+            plot_max_date = today
 
         all_dates = pd.date_range(start=plot_min_date, end=plot_max_date, freq='D')
-
-        filtered_dates = _apply_date_filter(pd.DataFrame({'Date': all_dates}), 'Date', date_range, custom_start_date, custom_end_date)['Date']
-
+        
+        filtered_dates_df = _apply_date_filter(pd.DataFrame({'Date': all_dates}), 'Date', date_range, custom_start_date, custom_end_date)
+        if filtered_dates_df.empty: return None
+        
+        filtered_dates = filtered_dates_df['Date']
+        
+        daily_wip_data = []
         for day in filtered_dates:
             daily_wip_df = wip_df[
                 (wip_df['Start date'] <= day) &
                 ((wip_df['Completed date'].isna()) | (wip_df['Completed date'] > day))
             ]
-
+            
             breakdown_str = '<br>'.join(f"{wt}: {count}" for wt, count in daily_wip_df['Work type'].value_counts().items())
             daily_wip_data.append({'Date': day, 'WIP': len(daily_wip_df), 'Breakdown': breakdown_str})
-
+        
         if not daily_wip_data: return None
         wip_over_time = pd.DataFrame(daily_wip_data)
-
+        
         fig = px.line(wip_over_time, x="Date", y="WIP", title="WIP (Work In Progress) Run Chart")
         fig.update_traces(
             customdata=wip_over_time[['Breakdown']],
             hovertemplate=ChartConfig.WIP_CHART_HOVER
         )
-
+        
         fig.update_layout(height=600)
         ChartGenerator._add_trend_line(fig, wip_over_time)
         return fig
@@ -1457,6 +1464,7 @@ class Dashboard:
                 display_df = self.raw_df[self.raw_df['Key'].isin(unplotted_df['Key'])][display_cols]
 
                 st.dataframe(display_df)
+
 
     def _display_wip_chart(self):
         """Displays the WIP chart."""
