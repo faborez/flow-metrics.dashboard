@@ -195,7 +195,6 @@ class DataProcessor:
         """Processes date columns and calculates cycle time."""
         try:
             processed_df = df.copy()
-            # ** THE FIX IS HERE: Use EARLIEST for start and LATEST for complete **
             processed_df['Start date'] = processed_df[start_col].apply(DataProcessor._extract_earliest_date) if start_col else pd.NaT
             processed_df['Completed date'] = processed_df[completed_col].apply(DataProcessor._extract_latest_date) if completed_col else pd.NaT
             return DataProcessor._calculate_cycle_time(processed_df)
@@ -231,7 +230,10 @@ class DataProcessor:
         df['Cycle time'] = (df['Completed date'] - df['Start date']).dt.days + 1
         invalid_cycle = (df['Cycle time'].notna()) & (df['Cycle time'] < 1)
         if invalid_cycle.any():
-            st.warning(f"Removed {invalid_cycle.sum()} items with invalid cycle times (< 1 day).")
+            st.warning(f"""
+            **Data Quality Warning:** {invalid_cycle.sum()} item(s) were excluded from this chart because their cycle time was calculated as zero or a negative value.
+            This usually happens when an item's Start Date is recorded as being after its Completion Date in your data file.
+            """)
             df = df[~invalid_cycle]
         return df
 
@@ -1070,7 +1072,7 @@ class Dashboard:
 
         all_dates = []
         for col in status_cols:
-            dates_in_col = df[col].apply(DataProcessor._extract_earliest_date).dropna()
+            dates_in_col = df[col].apply(DataProcessor._extract_latest_date).dropna()
             all_dates.extend(pd.to_datetime(dates_in_col, errors='coerce').dropna())
 
         if not all_dates:
