@@ -195,29 +195,34 @@ class DataProcessor:
         """Processes date columns and calculates cycle time."""
         try:
             processed_df = df.copy()
-            processed_df['Start date'] = pd.to_datetime(processed_df[start_col].apply(DataProcessor._extract_earliest_date) if start_col else pd.NaT, errors='coerce')
-            processed_df['Completed date'] = pd.to_datetime(processed_df[completed_col].apply(DataProcessor._extract_earliest_date) if completed_col else pd.NaT, errors='coerce')
+            processed_df['Start date'] = processed_df[start_col].apply(DataProcessor._extract_earliest_date) if start_col else pd.NaT
+            processed_df['Completed date'] = processed_df[completed_col].apply(DataProcessor._extract_earliest_date) if completed_col else pd.NaT
             return DataProcessor._calculate_cycle_time(processed_df)
         except Exception as e:
             st.error(f"Error processing dates: {str(e)}")
             return None
 
     @staticmethod
-    def _extract_earliest_date(date_str: Union[str, float]) -> Optional[str]:
-        """Extracts the earliest date from a string that may contain multiple dates."""
+    def _extract_earliest_date(date_str: Union[str, float]) -> Optional[datetime]:
+        """
+        Extracts the earliest date from a string that may contain multiple dates.
+        Handles various formats and returns a datetime object.
+        """
         if pd.isna(date_str) or str(date_str).strip() in ['-', '', 'nan']:
             return None
-        # This regex now supports both 'YYYY-MM-DD' and 'DD/MM/YYYY' formats
-        dates_ymd = re.findall(r'\d{4}-\d{2}-\d{2}', str(date_str))
-        dates_dmy = re.findall(r'\d{2}/\d{2}/\d{4}', str(date_str))
 
-        all_dates = []
-        if dates_ymd:
-            all_dates.extend([datetime.strptime(d, '%Y-%m-%d') for d in dates_ymd])
-        if dates_dmy:
-            all_dates.extend([datetime.strptime(d, '%d/%m/%Y') for d in dates_dmy])
+        date_parts = str(date_str).split(',')
+        parsed_dates = []
+        for part in date_parts:
+            try:
+                # Use errors='coerce' to return NaT for non-date parts, handle dayfirst for UK/EU formats
+                dt = pd.to_datetime(part.strip(), errors='coerce', dayfirst=True)
+                if pd.notna(dt):
+                    parsed_dates.append(dt)
+            except (ValueError, TypeError):
+                continue
 
-        return min(all_dates).strftime('%Y-%m-%d') if all_dates else None
+        return min(parsed_dates) if parsed_dates else None
 
 
     @staticmethod
@@ -241,46 +246,35 @@ class ChartGenerator:
         if not selected_statuses or df.empty:
             return None
 
-        # Map selected status names back to their actual column names
         status_cols = [status_col_map[s] for s in selected_statuses]
 
-        # Melt the DataFrame
         id_vars = ['Key']
         cfd_df_melted = df.melt(id_vars=id_vars, value_vars=status_cols, var_name='Status Column', value_name='Date Value')
 
-        # Clean up and convert dates
-        cfd_df_melted['Date'] = pd.to_datetime(cfd_df_melted['Date Value'].apply(DataProcessor._extract_earliest_date), errors='coerce')
+        cfd_df_melted['Date'] = cfd_df_melted['Date Value'].apply(DataProcessor._extract_earliest_date)
         cfd_df_melted.dropna(subset=['Date'], inplace=True)
         cfd_df_melted['Date'] = cfd_df_melted['Date'].dt.normalize()
 
-        # Map back to clean status names for the chart
         status_name_map = {v: k for k, v in status_col_map.items()}
         cfd_df_melted['Status'] = cfd_df_melted['Status Column'].map(status_name_map)
 
-        # Filter by date range
         if cfd_df_melted.empty: return None
         cfd_df_filtered = _apply_date_filter(cfd_df_melted, 'Date', date_range, custom_start_date, custom_end_date)
         if cfd_df_filtered.empty: return None
 
-        # Generate daily counts for each status
         daily_counts = cfd_df_filtered.groupby([cfd_df_filtered['Date'].dt.date, 'Status']).size().reset_index(name='Count')
 
-        # Create a full date range to ensure the chart is continuous
         min_chart_date, max_chart_date = daily_counts['Date'].min(), daily_counts['Date'].max()
         full_date_range = pd.to_datetime(pd.date_range(start=min_chart_date, end=max_chart_date))
 
-        # Pivot and calculate cumulative sums
         cfd_pivot = daily_counts.pivot_table(index='Date', columns='Status', values='Count', fill_value=0)
         cfd_cumulative = cfd_pivot.cumsum()
 
-        # Reindex to ensure all days are present and forward-fill missing values
         cfd_cumulative = cfd_cumulative.reindex(full_date_range.date, method='ffill').fillna(0)
 
-        # Unpivot the data for plotting with Plotly Express
         plot_df = cfd_cumulative.reset_index().rename(columns={'index': 'Date'})
         plot_df = plot_df.melt(id_vars='Date', value_name='Count', var_name='Status')
 
-        # Order the statuses as per user selection
         plot_df['Status'] = pd.Categorical(plot_df['Status'], categories=selected_statuses, ordered=True)
 
         fig = px.area(plot_df, x='Date', y='Count', color='Status',
@@ -437,8 +431,8 @@ class ChartGenerator:
 
             temp_df = df[[current_col, next_col]].copy()
 
-            temp_df['current_date'] = pd.to_datetime(temp_df[current_col].apply(DataProcessor._extract_earliest_date), errors='coerce')
-            temp_df['next_date'] = pd.to_datetime(temp_df[next_col].apply(DataProcessor._extract_earliest_date), errors='coerce')
+            temp_df['current_date'] = temp_df[current_col].apply(DataProcessor._extract_earliest_date)
+            temp_df['next_date'] = temp_df[next_col].apply(DataProcessor._extract_earliest_date)
 
             temp_df.dropna(subset=['current_date', 'next_date'], inplace=True)
 
@@ -476,56 +470,68 @@ class ChartGenerator:
         return fig, chart_df
 
     @staticmethod
-    def create_work_item_age_chart(df: DataFrame, status_order: List[str], cycle_time_percentiles: Dict[str, int], percentile_settings: Dict[str, bool], is_color_blind_mode: bool) -> Optional[Figure]:
-        """Creates the work item age chart with a column-based layout and horizontal jitter."""
+    def create_work_item_age_chart(
+        plot_df: DataFrame,
+        wip_df: DataFrame,
+        status_order: List[str],
+        cycle_time_percentiles: Dict[str, int],
+        percentile_settings: Dict[str, bool],
+        is_color_blind_mode: bool
+    ) -> Optional[Figure]:
+        """
+        Creates the work item age chart with a column-based layout and horizontal jitter.
+        Uses a separate DataFrame for WIP counts to ensure accuracy.
+        """
         age_data = []
-        for _, row in df.iterrows():
+        for _, row in plot_df.iterrows():
             start_date_val = row.get('Start date')
             if pd.notna(start_date_val):
                 age_data.append({
-                    'Key': row['Key'], 'Work type': row['Work type'], 'Status': row['Status'],
+                    'Key': row['Key'],
+                    'Work type': row['Work type'],
+                    'Status': row['Status'],
                     'Age': (datetime.now() - start_date_val).days + 1,
                     'Start date': start_date_val
                 })
 
-        if not age_data: return None
-        age_df = pd.DataFrame(age_data)
+        # chart_df contains only the items to be PLOTTED as dots
+        chart_df = pd.DataFrame(age_data) if age_data else pd.DataFrame(columns=['Key', 'Work type', 'Status', 'Age', 'Start date'])
 
-        age_df_filtered = age_df[age_df['Status'].isin(status_order)].copy()
-        if age_df_filtered.empty: return None
-
-        status_map = {status: i for i, status in enumerate(status_order)}
-        age_df_filtered['Status_Num'] = age_df_filtered['Status'].map(status_map)
-
-        jitter_strength = 0.25
-        age_df_filtered['Status_Jittered'] = age_df_filtered['Status_Num'] + np.random.uniform(-jitter_strength, jitter_strength, size=len(age_df_filtered))
-
-        chart_df = ChartGenerator._prepare_chart_data(age_df_filtered, ['Key', 'Work type', 'Status', 'Age', 'Status_Jittered', 'Start date'])
-        chart_df.dropna(subset=['Status', 'Status_Jittered'], inplace=True)
-        if chart_df.empty: return None
+        if not chart_df.empty:
+            status_map = {status: i for i, status in enumerate(status_order)}
+            chart_df['Status_Num'] = chart_df['Status'].map(status_map)
+            jitter_strength = 0.25
+            chart_df['Status_Jittered'] = chart_df['Status_Num'] + np.random.uniform(-jitter_strength, jitter_strength, size=len(chart_df))
+            chart_df = ChartGenerator._prepare_chart_data(chart_df, ['Key', 'Work type', 'Status', 'Age', 'Status_Jittered', 'Start date'])
+            chart_df.dropna(subset=['Status', 'Status_Jittered'], inplace=True)
 
         work_type_colors = ColorManager.get_work_type_colors(is_color_blind_mode)
         fig = go.Figure()
-        for work_type in ChartGenerator._order_work_types(chart_df):
-            df_type = chart_df[chart_df['Work type'] == work_type]
-            fig.add_trace(go.Scatter(
-                x=df_type['Status_Jittered'], y=df_type['Age'], mode='markers', name=work_type,
-                marker=dict(color=work_type_colors.get(work_type, Config.DEFAULT_COLOR), size=8, opacity=0.7),
-                customdata=df_type[['Key', 'Work type', 'Status', 'Start_date_formatted', 'Age_formatted']],
-                hovertemplate=ChartConfig.AGE_CHART_HOVER
-            ))
 
-        max_age = chart_df['Age'].max() if not chart_df.empty else 10
-        y_axis_max = max_age * 1.15
+        if not chart_df.empty:
+            for work_type in ChartGenerator._order_work_types(chart_df):
+                df_type = chart_df[chart_df['Work type'] == work_type]
+                fig.add_trace(go.Scatter(
+                    x=df_type['Status_Jittered'],
+                    y=df_type['Age'],
+                    mode='markers',
+                    name=work_type,
+                    marker=dict(color=work_type_colors.get(work_type, Config.DEFAULT_COLOR), size=8, opacity=0.7),
+                    customdata=df_type[['Key', 'Work type', 'Status', 'Start_date_formatted', 'Age_formatted']],
+                    hovertemplate=ChartConfig.AGE_CHART_HOVER
+                ))
+
+        max_age_plot = chart_df['Age'].max() if not chart_df.empty else 10
+        y_axis_max = max_age_plot * 1.15
 
         fig.update_layout(
-            title="Work Item Age Chart",
+            title="Work Item Age Analysis",
             yaxis_title="<b>Age (Calendar Days)</b>",
             height=900, legend_title="Work Type",
             xaxis=dict(
                 title_text="",
-                tickvals=list(status_map.values()),
-                ticktext=[f"<b>{s}</b>" for s in status_map.keys()],
+                tickvals=list(range(len(status_order))),
+                ticktext=[f"<b>{s}</b>" for s in status_order],
                 tickfont=dict(size=14),
                 showgrid=False,
                 zeroline=False
@@ -540,19 +546,19 @@ class ChartGenerator:
             showlegend=True
         )
 
-        for i in range(len(status_order)):
+        for i, status in enumerate(status_order):
             if i > 0:
                 fig.add_vline(x=i - 0.5, line_width=2, line_color='LightGrey')
 
-            count = len(chart_df[chart_df['Status'] == status_order[i]])
+            # KEY CHANGE: Use the wip_df for accurate WIP counts
+            count = len(wip_df[wip_df['Status'] == status])
             fig.add_annotation(
                 x=i, y=y_axis_max, text=f"<b>WIP = {count}</b>",
                 showarrow=False, font=dict(size=14, color="black"),
-                yanchor="bottom",
-                yshift=5
+                yanchor="bottom", yshift=5
             )
 
-        if cycle_time_percentiles:
+        if cycle_time_percentiles and not chart_df.empty:
             x_range_for_lines = [-0.5, len(status_order) - 0.5]
             ChartGenerator._add_percentile_lines(fig, chart_df, 'Age', x_range_for_lines, percentile_settings, is_color_blind_mode)
 
@@ -702,7 +708,7 @@ class ChartGenerator:
             return None
 
         throughput_df = df.copy()
-        throughput_df['Throughput Date'] = pd.to_datetime(throughput_df[throughput_status_col].apply(DataProcessor._extract_earliest_date), errors='coerce')
+        throughput_df['Throughput Date'] = throughput_df[throughput_status_col].apply(DataProcessor._extract_earliest_date)
         throughput_df.dropna(subset=['Throughput Date'], inplace=True)
 
         if throughput_df.empty:
@@ -780,7 +786,7 @@ class ChartGenerator:
         if not status_col:
             return None, None
         forecast_df = df.copy()
-        forecast_df['Forecast Completion Date'] = pd.to_datetime(forecast_df[status_col].apply(DataProcessor._extract_earliest_date), errors='coerce')
+        forecast_df['Forecast Completion Date'] = forecast_df[status_col].apply(DataProcessor._extract_earliest_date)
         completed_df = forecast_df.dropna(subset=['Forecast Completion Date'])
 
         if len(completed_df) < 2:
@@ -1364,7 +1370,11 @@ class Dashboard:
     def _display_work_item_age_chart(self):
         """Displays the Work Item Age chart and its controls."""
         st.header("Work Item Age Analysis")
-        st.markdown("This chart shows the age of your current 'in progress' items, calculated from their entry into the selected 'Start Status'.")
+        st.info("""
+        - **WIP counts** at the top show all in-progress items currently in that status.
+        - **Dots** on the chart represent only those items that have passed through the selected 'Start Status for Age Calculation'.
+        - A table will appear below the chart listing any items that are included in WIP but are not plotted as a dot.
+        """)
 
         status_options = ["None"] + list(self.status_mapping.keys())
         sensible_done_options = [s for s in status_options if s.lower() == 'done']
@@ -1373,13 +1383,13 @@ class Dashboard:
         with st.expander("Work Item Age Chart Controls", expanded=True):
             col1, col2, col3 = st.columns(3)
             with col1:
-                self.selections["age_start_status"] = st.selectbox("Start Status", status_options, key="age_start", index=1 if len(status_options) > 1 else 0, help="Defines the start of the X-axis and the point from which item age is calculated.")
+                self.selections["age_start_status"] = st.selectbox("Start Status for Age Calculation", status_options, key="age_start", index=1 if len(status_options) > 1 else 0, help="Defines the start of the X-axis and the point from which item age is calculated.")
             with col2:
                 try:
                     default_end_index = status_options.index("In Testing")
                 except ValueError:
                     default_end_index = len(status_options) - 2 if len(status_options) > 2 else 0
-                self.selections["age_end_status"] = st.selectbox("End Status", status_options, key="age_end", index=default_end_index, help="Defines the end of the X-axis.")
+                self.selections["age_end_status"] = st.selectbox("End Status for Axis", status_options, key="age_end", index=default_end_index, help="Defines the end of the X-axis.")
             with col3:
                 self.selections["age_true_final_status"] = st.selectbox("Select the true 'Done' status", status_options, key="age_final", index=default_done_index, help="Select the status that marks an item as completely finished for your workflow.")
 
@@ -1393,18 +1403,7 @@ class Dashboard:
             st.info("ℹ️ Please select all three status controls above to generate the chart.")
             return
 
-        df = self.raw_df.copy()
-        final_col = self.selections["age_true_final_col"]
-        start_col = self.selections["age_start_col"]
-
-        is_not_finished_mask = df[final_col].apply(lambda x: pd.isna(DataProcessor._extract_earliest_date(x)))
-        df_in_progress = df[is_not_finished_mask].copy()
-
-        df_in_progress['Start date'] = pd.to_datetime(df_in_progress[start_col].apply(DataProcessor._extract_earliest_date), errors='coerce')
-        age_df_source = df_in_progress.dropna(subset=['Start date']).copy()
-
-        age_df_source = self._apply_all_filters(age_df_source, apply_date_filter=False)
-
+        # 1. Determine the statuses that will be shown on the chart's X-axis
         try:
             raw_cols = list(self.raw_df.columns)
             start_idx = raw_cols.index(self.selections["age_start_col"])
@@ -1414,21 +1413,27 @@ class Dashboard:
             st.error("Could not determine status order for the chart axis. Check your axis status selections.")
             return
 
-        # Ensure cycle_stats are calculated based on the main filtered_df if available
-        if self.filtered_df is not None:
-            cycle_stats = StatsCalculator.cycle_time_stats(self.filtered_df)
-        else:
-            # Fallback if cycle time chart hasn't been generated yet
-            temp_processed = DataProcessor.process_dates(self.raw_df, self.selections.get('start_col'), self.selections.get('completed_col'))
-            if temp_processed is not None:
-                temp_filtered = self._apply_all_filters(temp_processed, apply_date_filter=True)
-                cycle_stats = StatsCalculator.cycle_time_stats(temp_filtered)
-            else:
-                cycle_stats = None
+        # 2. Get ALL items that are currently in progress
+        final_col = self.selections["age_true_final_col"]
+        df_in_progress = self.raw_df[self.raw_df[final_col].apply(lambda x: pd.isna(DataProcessor._extract_earliest_date(x)))].copy()
 
+        # 3. Create the DataFrame for calculating WIP counts
+        df_for_wip_calc = df_in_progress[df_in_progress['Status'].isin(status_order)].copy()
+        df_for_wip_calc = self._apply_all_filters(df_for_wip_calc, apply_date_filter=False)
 
+        # 4. Create the DataFrame for PLOTTING
+        start_col = self.selections["age_start_col"]
+        df_for_plotting = df_for_wip_calc.copy()
+        df_for_plotting['Start date'] = df_for_plotting[start_col].apply(DataProcessor._extract_earliest_date)
+        df_for_plotting.dropna(subset=['Start date'], inplace=True)
+
+        # 5. Get cycle time statistics for percentile lines
+        cycle_stats = StatsCalculator.cycle_time_stats(self.filtered_df) if self.filtered_df is not None and not self.filtered_df.empty else None
+
+        # 6. Generate the chart
         chart = ChartGenerator.create_work_item_age_chart(
-            age_df_source,
+            plot_df=df_for_plotting,
+            wip_df=df_for_wip_calc,
             status_order=status_order,
             cycle_time_percentiles=cycle_stats or {},
             percentile_settings=self.selections["percentiles"],
@@ -1437,7 +1442,21 @@ class Dashboard:
         if chart:
             st.plotly_chart(chart, use_container_width=True)
         else:
-            st.warning("⚠️ No 'in progress' items found to plot based on your selections. Please check that your 'Start' and 'Done' statuses are correct.")
+            st.warning("⚠️ No 'in progress' items found to plot based on your selections. Check that your status selections are correct.")
+
+        # 7. Identify and display items counted in WIP but not plotted
+        plotted_keys = df_for_plotting['Key'].tolist()
+        unplotted_df = df_for_wip_calc[~df_for_wip_calc['Key'].isin(plotted_keys)]
+
+        if not unplotted_df.empty:
+            expander_title = f"#### View {len(unplotted_df)} item(s) counted in WIP but not aged from '{self.selections['age_start_status']}'"
+            with st.expander(expander_title):
+                st.markdown(f"The following items are included in the WIP counts above but do not have a start date in the **'{self.selections['age_start_status']}'** column, so their age cannot be plotted from that point. Their full date history is shown below.")
+
+                display_cols = ['Key', 'Work type', 'Status'] + list(self.status_mapping.values())
+                display_df = self.raw_df[self.raw_df['Key'].isin(unplotted_df['Key'])][display_cols]
+
+                st.dataframe(display_df)
 
     def _display_wip_chart(self):
         """Displays the WIP chart."""
