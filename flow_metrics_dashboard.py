@@ -195,8 +195,9 @@ class DataProcessor:
         """Processes date columns and calculates cycle time."""
         try:
             processed_df = df.copy()
+            # ** THE FIX IS HERE: Use EARLIEST for start and LATEST for complete **
             processed_df['Start date'] = processed_df[start_col].apply(DataProcessor._extract_earliest_date) if start_col else pd.NaT
-            processed_df['Completed date'] = processed_df[completed_col].apply(DataProcessor._extract_earliest_date) if completed_col else pd.NaT
+            processed_df['Completed date'] = processed_df[completed_col].apply(DataProcessor._extract_latest_date) if completed_col else pd.NaT
             return DataProcessor._calculate_cycle_time(processed_df)
         except Exception as e:
             st.error(f"Error processing dates: {str(e)}")
@@ -204,25 +205,23 @@ class DataProcessor:
 
     @staticmethod
     def _extract_earliest_date(date_str: Union[str, float]) -> Optional[datetime]:
-        """
-        Extracts the earliest date from a string that may contain multiple dates.
-        Handles various formats and returns a datetime object.
-        """
+        """Extracts the EARLIEST date from a string that may contain multiple dates."""
         if pd.isna(date_str) or str(date_str).strip() in ['-', '', 'nan']:
             return None
-
         date_parts = str(date_str).split(',')
-        parsed_dates = []
-        for part in date_parts:
-            try:
-                # Use errors='coerce' to return NaT for non-date parts, handle dayfirst for UK/EU formats
-                dt = pd.to_datetime(part.strip(), errors='coerce', dayfirst=True)
-                if pd.notna(dt):
-                    parsed_dates.append(dt)
-            except (ValueError, TypeError):
-                continue
+        parsed_dates = [pd.to_datetime(part.strip(), errors='coerce', dayfirst=True) for part in date_parts]
+        valid_dates = [d for d in parsed_dates if pd.notna(d)]
+        return min(valid_dates) if valid_dates else None
 
-        return min(parsed_dates) if parsed_dates else None
+    @staticmethod
+    def _extract_latest_date(date_str: Union[str, float]) -> Optional[datetime]:
+        """Extracts the LATEST date from a string that may contain multiple dates."""
+        if pd.isna(date_str) or str(date_str).strip() in ['-', '', 'nan']:
+            return None
+        date_parts = str(date_str).split(',')
+        parsed_dates = [pd.to_datetime(part.strip(), errors='coerce', dayfirst=True) for part in date_parts]
+        valid_dates = [d for d in parsed_dates if pd.notna(d)]
+        return max(valid_dates) if valid_dates else None
 
 
     @staticmethod
@@ -431,8 +430,8 @@ class ChartGenerator:
 
             temp_df = df[[current_col, next_col]].copy()
 
-            temp_df['current_date'] = temp_df[current_col].apply(DataProcessor._extract_earliest_date)
-            temp_df['next_date'] = temp_df[next_col].apply(DataProcessor._extract_earliest_date)
+            temp_df['current_date'] = temp_df[current_col].apply(DataProcessor._extract_latest_date)
+            temp_df['next_date'] = temp_df[next_col].apply(DataProcessor._extract_latest_date)
 
             temp_df.dropna(subset=['current_date', 'next_date'], inplace=True)
 
@@ -715,7 +714,7 @@ class ChartGenerator:
             return None
 
         throughput_df = df.copy()
-        throughput_df['Throughput Date'] = throughput_df[throughput_status_col].apply(DataProcessor._extract_earliest_date)
+        throughput_df['Throughput Date'] = throughput_df[throughput_status_col].apply(DataProcessor._extract_latest_date)
         throughput_df.dropna(subset=['Throughput Date'], inplace=True)
 
         if throughput_df.empty:
@@ -793,7 +792,7 @@ class ChartGenerator:
         if not status_col:
             return None, None
         forecast_df = df.copy()
-        forecast_df['Forecast Completion Date'] = forecast_df[status_col].apply(DataProcessor._extract_earliest_date)
+        forecast_df['Forecast Completion Date'] = forecast_df[status_col].apply(DataProcessor._extract_latest_date)
         completed_df = forecast_df.dropna(subset=['Forecast Completion Date'])
 
         if len(completed_df) < 2:
@@ -1422,7 +1421,7 @@ class Dashboard:
 
         # 2. Get ALL items that are currently in progress
         final_col = self.selections["age_true_final_col"]
-        df_in_progress = self.raw_df[self.raw_df[final_col].apply(lambda x: pd.isna(DataProcessor._extract_earliest_date(x)))].copy()
+        df_in_progress = self.raw_df[self.raw_df[final_col].apply(lambda x: pd.isna(DataProcessor._extract_latest_date(x)))].copy()
 
         # 3. Create the DataFrame for calculating WIP counts
         df_for_wip_calc = df_in_progress[df_in_progress['Status'].isin(status_order)].copy()
@@ -1431,7 +1430,7 @@ class Dashboard:
         # 4. Create the DataFrame for PLOTTING
         start_col = self.selections["age_start_col"]
         df_for_plotting = df_for_wip_calc.copy()
-        df_for_plotting['Start date'] = df_for_plotting[start_col].apply(DataProcessor._extract_earliest_date)
+        df_for_plotting['Start date'] = df_for_plotting[start_col].apply(DataProcessor._extract_latest_date)
         df_for_plotting.dropna(subset=['Start date'], inplace=True)
 
         # 5. Get cycle time statistics for percentile lines
