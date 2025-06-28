@@ -130,7 +130,7 @@ class StatusManager:
         try:
             columns = list(df.columns)
             if columns.index(start_col) >= columns.index(completed_col):
-                return False, "Start status must be earlier in the workflow than completed status."
+                return False, "The selected 'Start Status' must come before the 'Done Status' in your workflow. Please check the order of your status columns in the data file."
             return True, ""
         except ValueError:
             return False, "Invalid status columns selected."
@@ -154,7 +154,7 @@ class DataProcessor:
                     df = df.rename(columns={'Issue Type': 'Work type'})
 
                 if not {'Key', 'Work type'}.issubset(df.columns):
-                    st.error("Invalid file format: CSV must include 'Key' and 'Work type' (or 'Issue type'/'Issue Type') columns.")
+                    st.error("**Invalid File Format:** The uploaded CSV is missing required columns. Please ensure your file includes both a 'Key' and a 'Work type' column.")
                     return None
                 return df
             except UnicodeDecodeError:
@@ -162,7 +162,7 @@ class DataProcessor:
             except Exception as e:
                 st.error(f"Error loading data with encoding {encoding}: {str(e)}")
                 return None
-        st.error("Failed to load CSV: Unable to decode with supported encodings (utf-8, latin1, iso-8859-1).")
+        st.error("**File Load Error:** The dashboard could not read this file. Please ensure the file is a standard CSV and try exporting it from Jira again.")
         return None
 
     @staticmethod
@@ -173,8 +173,7 @@ class DataProcessor:
         if df_clean.duplicated(subset=['Key']).any():
             duplicates = df_clean[df_clean.duplicated(subset=['Key'], keep=False)]
             st.warning(
-                f"Found and removed {len(duplicates.drop_duplicates(subset=['Key']))} duplicate work item key(s). "
-                f"The first occurrence of each was kept. Example duplicate key: {duplicates['Key'].iloc[0]}"
+                f"**Data Quality Note:** Found and removed {len(duplicates.drop_duplicates(subset=['Key']))} duplicate work items to prevent calculation errors. The first version of each item was kept. (Example duplicate key: {duplicates['Key'].iloc[0]})"
             )
 
         df_clean = df_clean.drop_duplicates(subset=['Key'], keep='first').copy()
@@ -724,7 +723,7 @@ class ChartGenerator:
 
         if interval == 'Fortnightly':
             if not sprint_anchor_date:
-                st.warning("Please select a 'Sprint End Date' to establish the fortnightly sprint cycle.")
+                st.warning("For fortnightly throughput, please select a 'Sprint End Date' to set the 2-week cycle.")
                 return None
 
             anchor = pd.to_datetime(sprint_anchor_date)
@@ -804,17 +803,17 @@ class ChartGenerator:
         start_of_period = last_completion_date - pd.DateOffset(weeks=25)
         recent_completed_df = completed_df[completed_df['Forecast Completion Date'] > start_of_period]
         if recent_completed_df.empty:
-            st.warning("Not enough recent data for forecasting. Need completed items from the last 25 weeks.")
+            st.warning("**Forecasting requires more data.** To run a forecast, the dashboard needs at least two weeks of completed work from the last 25 weeks.")
             return None, None
 
         weekly_throughput = recent_completed_df.groupby(pd.Grouper(key='Forecast Completion Date', freq='W-MON')).size()
 
         num_weeks_of_data = len(weekly_throughput)
         if num_weeks_of_data < 2:
-            st.warning("Not enough weekly throughput samples in the last 25 weeks to forecast.")
+            st.warning("**Forecasting requires more data.** To run a forecast, the dashboard needs at least two weeks of completed work from the last 25 weeks.")
             return None, None
         if num_weeks_of_data < 7:
-            st.warning(f"Forecast is based on only {num_weeks_of_data} weeks of data. For a more reliable forecast, more historical data is recommended.")
+            st.warning(f"**Note:** This forecast is based on only {num_weeks_of_data} weeks of data. Forecasts become more reliable with more history.")
 
         weights = np.arange(1, num_weeks_of_data + 1)
         normalized_weights = weights / np.sum(weights)
@@ -1053,7 +1052,7 @@ class Dashboard:
 
         self.status_mapping = StatusManager.extract_status_columns(self.raw_df)
         if not self.status_mapping:
-            st.error("No status columns found. Ensure JIRA export includes columns with '->' prefix.")
+            st.error("**Configuration Error:** Could not find any status columns in your file. Please make sure your Jira export was created with the 'Show entry dates' option selected, which creates the required '-> Status' columns.")
             return
 
         date_bounds_df = self._pre_process_for_sidebar()
@@ -1279,7 +1278,7 @@ class Dashboard:
         st.divider()
 
         if not self.selections["start_col"] or not self.selections["completed_col"]:
-            st.info("ℹ️ Please select a 'Starting Status' and 'Done Status' above to generate Cycle Time charts.")
+            st.info("To see your charts, please choose a 'Starting Status' and a 'Done Status' from the dropdowns above.")
             return
 
         is_valid, error_msg = StatusManager.validate_status_order(self.raw_df, self.selections["start_col"], self.selections["completed_col"])
@@ -1304,22 +1303,22 @@ class Dashboard:
             st.markdown("ℹ️ *A small amount of random vertical 'jitter' has been added to separate overlapping points.*")
             chart = ChartGenerator.create_cycle_time_chart(self.filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
             if chart: st.plotly_chart(chart, use_container_width=True)
-            else: st.warning("⚠️ No items with both start and done dates for Cycle Time scatter plot.")
+            else: st.warning("No completed items in the selected date range could be found to display on this chart.")
         with ct_tabs[1]:
             st.subheader("Aggregated Bubble Chart")
             st.markdown("ℹ️ *Bubbles represent one or more items completed on the same day with the same cycle time.*")
             chart = ChartGenerator.create_cycle_time_bubble_chart(self.filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
             if chart: st.plotly_chart(chart, use_container_width=True)
-            else: st.warning("⚠️ No items to display in the Bubble Chart.")
+            else: st.warning("No completed items in the selected date range could be found to display on this chart.")
         with ct_tabs[2]:
             st.subheader("Cycle Time Distribution Over Time")
             chart = ChartGenerator.create_cycle_time_box_plot(self.filtered_df, self.selections["box_plot_interval"], self.selections["percentiles"], self.selections['color_blind_mode'])
             if chart: st.plotly_chart(chart, use_container_width=True)
-            else: st.warning("⚠️ No items to display in the Box Plot.")
+            else: st.warning("No completed items in the selected date range could be found to display on this chart.")
         with ct_tabs[3]:
             chart = ChartGenerator.create_cycle_time_histogram(self.filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
             if chart: st.plotly_chart(chart, use_container_width=True)
-            else: st.warning("⚠️ No items to display in Cycle Time histogram.")
+            else: st.warning("No completed items in the selected date range could be found to display on this chart.")
         with ct_tabs[4]:
             st.markdown("This chart shows the average time items spend in each status column of your raw data export.")
             status_cols = list(self.status_mapping.values())
@@ -1338,7 +1337,7 @@ class Dashboard:
                             value=f"{int(row['Average Time (Days)'])} days"
                         )
             else:
-                st.warning("⚠️ Not enough data to calculate time in status.")
+                st.warning("Not enough data was found for the selected statuses to calculate the average time spent in each.")
 
     def _display_story_point_chart(self):
         """Displays the Story Point Correlation chart and its controls."""
@@ -1408,7 +1407,7 @@ class Dashboard:
         st.divider()
 
         if not all([self.selections["age_start_col"], self.selections["age_end_col"], self.selections["age_true_final_col"]]):
-            st.info("ℹ️ Please select all three status controls above to generate the chart.")
+            st.info("To see the chart, please select a 'Start Status for Age Calculation', an 'End Status for Axis', and a true 'Done' status from the controls above.")
             return
 
         # 1. Determine the statuses that will be shown on the chart's X-axis
@@ -1450,7 +1449,7 @@ class Dashboard:
         if chart:
             st.plotly_chart(chart, use_container_width=True)
         else:
-            st.warning("⚠️ No 'in progress' items found to plot based on your selections. Check that your status selections are correct.")
+            st.warning("No work items currently in progress were found based on your status selections.")
 
         # 7. Identify and display items counted in WIP but not plotted
         plotted_keys = df_for_plotting['Key'].tolist()
@@ -1550,7 +1549,7 @@ class Dashboard:
 
         throughput_status = self.selections.get('throughput_status')
         if not throughput_status or throughput_status == "None":
-            st.info("ℹ️ Please select a throughput status on the 'Throughput' tab to enable forecasting.")
+            st.info("To run a forecast, first go to the 'Throughput' tab and choose the status that represents work being completed.")
             return
 
         info_text = (
@@ -1666,30 +1665,50 @@ class Dashboard:
 
 def display_welcome_message():
     """Displays the initial welcome message and instructions."""
-    st.markdown("### 👋 Welcome to the Flow Metrics Dashboard!")
+    st.markdown("### 👋 Welcome to the Flow Metrics Dashboard")
+    
+    def _create_inline_link_with_logo(text: str, logo_path: str, url: str) -> str:
+        """Creates a markdown-compatible HTML string for a link with an inline logo."""
+        try:
+            with open(logo_path, "rb") as f:
+                logo_b64 = base64.b64encode(f.read()).decode()
+            return (
+                f'<a href="{url}" target="_blank" style="text-decoration: none; color: inherit; font-weight: bold;">'
+                f'<img src="data:image/png;base64,{logo_b64}" style="height: 1.1em; vertical-align: -0.2em; margin-right: 5px;">'
+                f'{text}</a>'
+            )
+        except FileNotFoundError:
+            return f'<a href="{url}" target="_blank">**{text}**</a>'
+            
+    pro_url = "https://marketplace.atlassian.com/apps/1221826/status-time-reports-time-in-status"
+    pro_link = _create_inline_link_with_logo("Status Time Reports", "Status time pro icon.png", pro_url)
+    
+    free_url = "https://marketplace.atlassian.com/apps/1222051/status-time-reports-free-time-in-status?hosting=cloud&tab=overview"
+    free_link = _create_inline_link_with_logo("Status Time Reports Free", "Status time free icon.png", free_url)
 
-    st.markdown("A dynamic set of flow metrics charts and forecasting built to analyze data exported from specific Jira plugins.")
+    st.markdown(f"A dynamic set of flow metrics charts and forecasting built to analyze data exported from the Jira plugins {pro_link} & {free_link}.", unsafe_allow_html=True)
 
     with st.expander("How to export your data from Jira", expanded=True):
         st.markdown("""
         #### Export Settings
-        1. In the plugin, select the projects, filters and statuses you want to analyze.
-        2. In the export options, you **must** select **'Show entry dates'** from the Report List dropdown. This is what creates the `-> Status` columns that this dashboard needs to calculate flow metrics.
-        3. It is recommended to **exclude** the 'Summary' or 'Title' field. These fields are not used and can slow down the upload.
-        4. **Important:** Do not include any columns that contain Personally Identifiable Information (PII) or other sensitive data in your export.
+        1. **Choose your data**: In the plugin, select the projects, filters, and work item types you want to analyze.
+        2. **Order your Status columns**: For the most accurate charts, it's best to order the Status columns in the export settings to match your team's workflow (e.g., `Backlog` -> `To Do` -> `In Progress` -> `Done`).
+        3. **Select 'Show entry dates'**: You must select this from the Report List dropdown. This creates the `-> Status` columns that this dashboard needs to calculate flow metrics.
+        4. **Exclude unnecessary fields**: It is recommended to exclude the 'Summary' or 'Title' field. These fields are not used and can slow down the upload.
+        5. **Protect sensitive data**: Do not include any columns that contain Personally Identifiable Information (PII) or other sensitive data in your export.
         """)
 
     st.header("🔒 Data Security & Privacy")
     st.success(
-        "**Your data is safe.** This application processes your CSV file entirely within the browser and in memory for your session. "
-        "No data from your uploaded file is ever saved, stored, or logged on any server. When you close this browser tab, your data is permanently discarded."
+        "**Your data is safe.** This application processes your CSV file entirely within your browser. "
+        "No data from your uploaded file is ever sent to, saved, or stored on any server. When you close this browser tab, your data is permanently discarded."
     )
 
 def _apply_date_filter(df: pd.DataFrame, date_col_name: str, date_range: str, custom_start_date, custom_end_date) -> pd.DataFrame:
     """Filters a DataFrame based on a date column and a selected date range string."""
     if date_range == "All time" or pd.to_datetime(df[date_col_name], errors='coerce').isna().all():
         return df
-
+    
     today = pd.to_datetime(datetime.now().date())
     if date_range == "Last 30 days":
         cutoff = today - pd.DateOffset(days=30)
@@ -1718,7 +1737,7 @@ def format_multiselect_display(selection, name: str) -> str:
 def main():
     """Main function to run the Streamlit app."""
     st.title("📊 Flow Metrics Dashboard")
-
+    
     uploaded_file = st.file_uploader("📁 Upload CSV file", type=["csv"], help="Upload a JIRA export CSV.")
     if uploaded_file:
         Dashboard(uploaded_file).run()
