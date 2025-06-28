@@ -22,16 +22,20 @@ class ColorManager:
         'Epic': '#8B5CF6', 'Story': '#10B981', 'Task': '#3B82F6',
         'Bug': '#EF4444', 'Spike': '#F97316'
     }
+    # New Color-Blind Friendly palette from ColorBrewer's "PuOr"
     COLOR_BLIND_FRIENDLY_COLORS = {
-        'Epic': '#EE7733', 'Story': '#0077BB', 'Task': '#33BBEE',
-        'Bug': '#EE3377', 'Spike': '#CC3311'
+        'Epic': 'rgb(230,97,1)',
+        'Story': 'rgb(253,184,99)',
+        'Task': 'rgb(178,171,210)',
+        'Bug': 'rgb(94,60,153)',
+        'Spike': '#b15928' # Brown from a different palette for Spike
     }
     DEFAULT_PERCENTILE_COLORS = { 50: "red", 70: "orange", 85: "green", 95: "blue" }
     COLOR_BLIND_FRIENDLY_PERCENTILE_COLORS = {
         50: '#E69F00', # Orange
-        70: '#56B4E9', # Sky Blue
-        85: '#009E73', # Bluish Green
-        95: '#0072B2'  # Blue
+        70: '#d95f02', # Darker Orange
+        85: '#7570b3', # Purple
+        95: '#e7298a'  # Pink
     }
     DEFAULT_FORECAST_BOX_COLORS = {
         50: "#f8d7da", 70: "#fff3cd", 85: "#d4edda", 95: "#a3bde0"
@@ -241,7 +245,7 @@ class ChartGenerator:
     """Generates Plotly charts for the dashboard."""
     @staticmethod
     @st.cache_data
-    def create_cumulative_flow_diagram(df: DataFrame, selected_statuses: List[str], status_col_map: Dict[str, str], date_range: str, custom_start_date: Optional[datetime], custom_end_date: Optional[datetime]) -> Optional[Figure]:
+    def create_cumulative_flow_diagram(df: DataFrame, selected_statuses: List[str], status_col_map: Dict[str, str], date_range: str, custom_start_date: Optional[datetime], custom_end_date: Optional[datetime], is_color_blind_mode: bool) -> Optional[Figure]:
         """Creates a Cumulative Flow Diagram (CFD)."""
         if not selected_statuses or df.empty:
             return None
@@ -276,11 +280,15 @@ class ChartGenerator:
         plot_df = plot_df.melt(id_vars='Date', value_name='Count', var_name='Status')
 
         plot_df['Status'] = pd.Categorical(plot_df['Status'], categories=selected_statuses, ordered=True)
+        
+        # Use the appropriate color map
+        color_map = ColorManager.get_work_type_colors(is_color_blind_mode) if is_color_blind_mode else None
 
         fig = px.area(plot_df, x='Date', y='Count', color='Status',
                       title='Cumulative Flow Diagram',
                       labels={'Date': 'Date', 'Count': 'Cumulative Count of Items'},
-                      category_orders={'Status': selected_statuses})
+                      category_orders={'Status': selected_statuses},
+                      color_discrete_map=color_map)
 
         fig.update_layout(height=600, legend_title='Workflow Stage')
         return fig
@@ -1250,7 +1258,8 @@ class Dashboard:
             self.status_mapping,
             self.selections['date_range'],
             self.selections['custom_start_date'],
-            self.selections['custom_end_date']
+            self.selections['custom_end_date'],
+            self.selections['color_blind_mode']
         )
         if chart:
             st.plotly_chart(chart, use_container_width=True)
@@ -1670,6 +1679,10 @@ def display_welcome_message():
     def _create_inline_link_with_logo(text: str, logo_path: str, url: str) -> str:
         """Creates a markdown-compatible HTML string for a link with an inline logo."""
         try:
+            # Check if the logo file exists before trying to open it
+            if not os.path.exists(logo_path):
+                return f'<a href="{url}" target="_blank">**{text}**</a>'
+            
             with open(logo_path, "rb") as f:
                 logo_b64 = base64.b64encode(f.read()).decode()
             return (
@@ -1677,7 +1690,7 @@ def display_welcome_message():
                 f'<img src="data:image/png;base64,{logo_b64}" style="height: 1.1em; vertical-align: -0.2em; margin-right: 5px;">'
                 f'{text}</a>'
             )
-        except FileNotFoundError:
+        except Exception: # Broad exception to catch any file handling errors
             return f'<a href="{url}" target="_blank">**{text}**</a>'
             
     pro_url = "https://marketplace.atlassian.com/apps/1221826/status-time-reports-time-in-status"
@@ -1693,7 +1706,7 @@ def display_welcome_message():
         #### Export Settings
         1. **Choose your data**: In the plugin, select the projects, filters, and work item types you want to analyze.
         2. **Order your Status columns**: For the most accurate charts, it's best to order the Status columns in the export settings to match your team's workflow (e.g., `Backlog` -> `To Do` -> `In Progress` -> `Done`).
-        3. **Select 'Show entry dates'**: You must select this from the Report List dropdown. This creates the `-> Status` columns that this dashboard needs to calculate flow metrics.
+        3. **Select 'Show entry dates'**: You **must** select this from the Report List dropdown. This creates the `-> Status` columns that this dashboard needs to calculate flow metrics.
         4. **Exclude unnecessary fields**: It is recommended to exclude the 'Summary' or 'Title' field. These fields are not used and can slow down the upload.
         5. **Protect sensitive data**: Do not include any columns that contain Personally Identifiable Information (PII) or other sensitive data in your export.
         """)
