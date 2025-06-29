@@ -46,6 +46,12 @@ class ColorManager:
         85: "#D4E6F1", # Pastel Blue
         95: "#D1E8E2"  # Pastel Teal/Green
     }
+    STABILITY_SCORE_COLORS = {
+        "Stable": "#28a745", # Green
+        "Some Variability": "#ffc107", # Orange/Yellow
+        "High Variability": "#dc3545" # Red
+    }
+
 
     @staticmethod
     def get_work_type_colors(is_color_blind_mode: bool) -> Dict[str, str]:
@@ -206,13 +212,33 @@ class DataProcessor:
             return None
 
     @staticmethod
+    def _parse_date_part(part: str) -> Optional[datetime]:
+        """Parses a single date string part, trying multiple formats."""
+        part = part.strip()
+        # Try explicit formats first for robustness
+        formats_to_try = [
+            '%d/%m/%Y %H:%M',
+            '%Y-%m-%d %H:%M',
+            '%d/%m/%Y',
+            '%Y-%m-%d'
+        ]
+        for fmt in formats_to_try:
+            try:
+                return datetime.strptime(part, fmt)
+            except ValueError:
+                continue
+        # Fallback to pandas' general parser if explicit formats fail
+        dt = pd.to_datetime(part, errors='coerce')
+        return dt if pd.notna(dt) else None
+
+    @staticmethod
     def _extract_earliest_date(date_str: Union[str, float]) -> Optional[datetime]:
         """Extracts the EARLIEST date from a string that may contain multiple dates."""
         if pd.isna(date_str) or str(date_str).strip() in ['-', '', 'nan']:
             return None
         date_parts = str(date_str).split(',')
-        parsed_dates = [pd.to_datetime(part.strip(), errors='coerce', dayfirst=True) for part in date_parts]
-        valid_dates = [d for d in parsed_dates if pd.notna(d)]
+        valid_dates = [DataProcessor._parse_date_part(part) for part in date_parts]
+        valid_dates = [d for d in valid_dates if d is not None]
         return min(valid_dates) if valid_dates else None
 
     @staticmethod
@@ -221,8 +247,8 @@ class DataProcessor:
         if pd.isna(date_str) or str(date_str).strip() in ['-', '', 'nan']:
             return None
         date_parts = str(date_str).split(',')
-        parsed_dates = [pd.to_datetime(part.strip(), errors='coerce', dayfirst=True) for part in date_parts]
-        valid_dates = [d for d in parsed_dates if pd.notna(d)]
+        valid_dates = [DataProcessor._parse_date_part(part) for part in date_parts]
+        valid_dates = [d for d in valid_dates if d is not None]
         return max(valid_dates) if valid_dates else None
 
 
@@ -268,6 +294,7 @@ class ChartGenerator:
 
         daily_counts = cfd_df_filtered.groupby([cfd_df_filtered['Date'].dt.date, 'Status']).size().reset_index(name='Count')
 
+        if daily_counts.empty: return None
         min_chart_date, max_chart_date = daily_counts['Date'].min(), daily_counts['Date'].max()
         full_date_range = pd.to_datetime(pd.date_range(start=min_chart_date, end=max_chart_date))
 
@@ -728,6 +755,26 @@ class ChartGenerator:
 
         if throughput_df.empty:
             return None
+            
+        # --- NEW LOGIC TO DETECT AND REMOVE FUTURE OUTLIERS ---
+        if len(throughput_df) > 1:
+            date_percentile_98 = throughput_df['Throughput Date'].quantile(0.98)
+            # Add a buffer to the percentile to define the cutoff
+            cutoff_date = date_percentile_98 + timedelta(days=30)
+            
+            # Find items with dates beyond this cutoff
+            future_dated_items = throughput_df[throughput_df['Throughput Date'] > cutoff_date]
+            
+            if not future_dated_items.empty:
+                outlier_keys = ", ".join(future_dated_items['Key'].astype(str).tolist())
+                st.warning(f"**Data Quality Warning:** Found and excluded {len(future_dated_items)} item(s) with completion dates that appear to be outliers (e.g., dates set far in the future). This may affect forecast accuracy. Please check the following item key(s): {outlier_keys}")
+                
+                # Filter the dataframe to remove the outliers
+                throughput_df = throughput_df[throughput_df['Throughput Date'] <= cutoff_date]
+
+        if throughput_df.empty:
+            return None
+        # --- END OF NEW LOGIC ---
 
         if interval == 'Fortnightly':
             if not sprint_anchor_date:
@@ -806,6 +853,12 @@ class ChartGenerator:
 
         if len(completed_df) < 2:
             return None, None
+            
+        # Filter out outliers before calculating throughput for forecasting
+        if len(completed_df) > 1:
+            date_percentile_98 = completed_df['Forecast Completion Date'].quantile(0.98)
+            cutoff_date = date_percentile_98 + timedelta(days=30)
+            completed_df = completed_df[completed_df['Forecast Completion Date'] <= cutoff_date]
 
         last_completion_date = completed_df['Forecast Completion Date'].max()
         start_of_period = last_completion_date - pd.DateOffset(weeks=25)
@@ -1566,11 +1619,20 @@ class Dashboard:
             f"The forecast simulation is based on items reaching the **'{throughput_status}'** status selected on the Throughput chart."
         )
         st.info(info_text)
-
-        forecast_tabs = st.tabs(["**How Many** (by date)", "**When** (by # of items)"])
-
+        
         forecast_source_df = self._apply_all_filters(self.raw_df, apply_date_filter=False)
         throughput_status_col = self.selections.get('throughput_status_col')
+        
+        # --- Stability Check ---
+        weekly_throughput, _ = ChartGenerator._get_recent_weekly_throughput(forecast_source_df, throughput_status_col)
+        
+        with st.expander("Data Stability Check"):
+            if weekly_throughput is None or len(weekly_throughput) < 4:
+                st.warning("Not enough historical data to perform a stability check. At least 4 weeks of throughput data are needed.")
+            else:
+                self._display_stability_check(weekly_throughput)
+
+        forecast_tabs = st.tabs(["**How Many** (by date)", "**When** (by # of items)"])
 
         with forecast_tabs[0]:
             st.subheader("How many items can we complete by a certain date?")
@@ -1671,6 +1733,58 @@ class Dashboard:
                         cols[i].metric(label=f"{p}% Likelihood", value=date_val.strftime("%d %b, %Y"))
                 else:
                     st.info("Not enough data to run scenario analysis.")
+
+    def _display_stability_check(self, throughput_data: pd.Series):
+        """Calculates and displays the stability check metrics."""
+        shuffled_data = throughput_data.sample(frac=1).reset_index(drop=True)
+        split_point = len(shuffled_data) // 2
+        
+        group1 = shuffled_data.iloc[:split_point]
+        group2 = shuffled_data.iloc[split_point:]
+
+        avg1, avg2 = group1.mean(), group2.mean()
+        median1, median2 = group1.median(), group2.median()
+
+        if avg1 == 0 and avg2 == 0:
+            stability_score = 0
+        else:
+            stability_score = abs(avg1 - avg2) / ((avg1 + avg2) / 2) * 100
+
+        if stability_score < 15:
+            score_category = "Stable"
+            message = f"✅ **Stable Data ({stability_score:.1f}% variation):** Your historical data is consistent and well-suited for forecasting."
+        elif stability_score < 30:
+            score_category = "Some Variability"
+            message = f"⚠️ **Some Variability ({stability_score:.1f}% variation):** Your data shows some inconsistencies. The forecast is still useful but should be considered with this in mind."
+        else:
+            score_category = "High Variability"
+            message = f"🚨 **High Variability ({stability_score:.1f}% variation):** Your process appears unstable. Forecasts based on this data may be unreliable and should be used with caution."
+            
+        st.markdown(f'<p style="color:{ColorManager.STABILITY_SCORE_COLORS[score_category]}; font-weight: bold;">{message}</p>', unsafe_allow_html=True)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("##### Group 1 (Random Half)")
+            st.metric("Average Throughput", f"{avg1:.2f}")
+            st.metric("Median Throughput", f"{median1:.2f}")
+        with col2:
+            st.markdown("##### Group 2 (Random Half)")
+            st.metric("Average Throughput", f"{avg2:.2f}")
+            st.metric("Median Throughput", f"{median2:.2f}")
+            
+        if score_category == "High Variability":
+            st.markdown("""
+            ---
+            **Potential Causes of High Variability:**
+            - **Work Item Size:** A mix of very large and very small items being completed in different weeks.
+            - **Team Availability:** Holidays or sick leave impacting some weeks more than others.
+            - **Batching of Work:** Closing many items at once (e.g., at the end of a sprint) instead of a steady flow.
+            - **External Blockers:** Periods of waiting for other teams, systems, or information.
+            - **Process or Team Changes:** Recent changes to your team's structure or way of working.
+            
+            This stability check is a prompt to investigate *why* your process is unpredictable to improve your flow.
+            """)
+
 
 def display_welcome_message():
     """Displays the initial welcome message and instructions."""
