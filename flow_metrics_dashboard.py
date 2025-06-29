@@ -822,6 +822,11 @@ class ChartGenerator:
 
         agg_df = _apply_date_filter(agg_df, 'Period End', date_range, custom_start_date, custom_end_date)
         if agg_df.empty: return None
+        
+        # Final filter to remove empty trailing periods
+        max_date = throughput_df['Throughput Date'].max()
+        agg_df = agg_df[agg_df['Period'] <= max_date]
+
 
         agg_df['Period_End_Formatted'] = agg_df['Period End'].dt.strftime('%d/%m/%Y')
         agg_df['Details'] = "<b>Breakdown:</b><br>" + agg_df['Details']
@@ -868,6 +873,10 @@ class ChartGenerator:
             return None, None
 
         weekly_throughput = recent_completed_df.groupby(pd.Grouper(key='Forecast Completion Date', freq='W-MON')).size()
+        
+        # Ensure we don't have future empty bins
+        max_date = recent_completed_df['Forecast Completion Date'].max()
+        weekly_throughput = weekly_throughput[weekly_throughput.index <= max_date]
 
         num_weeks_of_data = len(weekly_throughput)
         if num_weeks_of_data < 2:
