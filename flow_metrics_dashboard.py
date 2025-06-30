@@ -651,7 +651,7 @@ class ChartGenerator:
             yaxis_title="Cycle Time (Days)",
             height=900,
             legend_title="Work Type",
-            legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99)
+            legend=dict(yanchor="top", y=1, xanchor="left", x=1.02)
         )
         fig.update_xaxes(
             tickmode='array',
