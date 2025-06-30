@@ -215,7 +215,6 @@ class DataProcessor:
     def _parse_date_part(part: str) -> Optional[datetime]:
         """Parses a single date string part, trying multiple formats."""
         part = part.strip()
-        # Try explicit formats first for robustness
         formats_to_try = [
             '%d/%m/%Y %H:%M',
             '%Y-%m-%d %H:%M',
@@ -227,7 +226,6 @@ class DataProcessor:
                 return datetime.strptime(part, fmt)
             except ValueError:
                 continue
-        # Fallback to pandas' general parser if explicit formats fail
         dt = pd.to_datetime(part, errors='coerce')
         return dt if pd.notna(dt) else None
 
@@ -756,34 +754,29 @@ class ChartGenerator:
         if throughput_df.empty:
             return None
             
-        # --- NEW LOGIC TO DETECT AND REMOVE FUTURE OUTLIERS ---
         if len(throughput_df) > 1:
             date_percentile_98 = throughput_df['Throughput Date'].quantile(0.98)
-            # Add a buffer to the percentile to define the cutoff
             cutoff_date = date_percentile_98 + timedelta(days=30)
             
-            # Find items with dates beyond this cutoff
             future_dated_items = throughput_df[throughput_df['Throughput Date'] > cutoff_date]
             
             if not future_dated_items.empty:
                 outlier_keys = ", ".join(future_dated_items['Key'].astype(str).tolist())
                 st.warning(f"**Data Quality Warning:** Found and excluded {len(future_dated_items)} item(s) with completion dates that appear to be outliers (e.g., dates set far in the future). This may affect forecast accuracy. Please check the following item key(s): {outlier_keys}")
                 
-                # Filter the dataframe to remove the outliers
                 throughput_df = throughput_df[throughput_df['Throughput Date'] <= cutoff_date]
 
         if throughput_df.empty:
             return None
-        # --- END OF NEW LOGIC ---
 
+        # === START: REFACTORED AND NORMALIZED THROUGHPUT LOGIC ===
         if interval == 'Fortnightly':
             if not sprint_anchor_date:
                 st.warning("For fortnightly throughput, please select a 'Sprint End Date' to set the 2-week cycle.")
                 return None
 
             anchor = pd.to_datetime(sprint_anchor_date)
-
-            min_date, max_date = throughput_df['Throughput Date'].min(), throughput_df['Throughput Date'].max()
+            min_date, max_date_in_data = throughput_df['Throughput Date'].min(), throughput_df['Throughput Date'].max()
 
             bins = [anchor]
             temp_date_back = anchor
@@ -792,18 +785,24 @@ class ChartGenerator:
                 bins.insert(0, temp_date_back)
 
             temp_date_forward = anchor
-            while temp_date_forward < max_date:
+            while temp_date_forward < max_date_in_data:
                 temp_date_forward += timedelta(days=14)
                 bins.append(temp_date_forward)
+            
+            bins = sorted(list(set(bins)))
+            
+            throughput_df['Period Interval'] = pd.cut(throughput_df['Throughput Date'], bins=bins, right=True, include_lowest=True, labels=bins[1:])
+            
+            # Drop rows where pd.cut resulted in NaNs
+            throughput_df.dropna(subset=['Period Interval'], inplace=True)
 
-            labels = bins[1:]
-            throughput_df['Period'] = pd.cut(throughput_df['Throughput Date'], bins=bins, labels=labels, right=True, include_lowest=True)
-
-            agg_df = throughput_df.groupby('Period').agg(
+            agg_df = throughput_df.groupby('Period Interval').agg(
                 Throughput=('Key', 'count'),
                 Details=('Work type', lambda s: '<br>'.join(f"{wt}: {count}" for wt, count in s.value_counts().items()))
             ).reset_index()
-            agg_df['Period End'] = pd.to_datetime(agg_df['Period'])
+
+            agg_df['Period End'] = pd.to_datetime(agg_df['Period Interval'])
+            agg_df['Period Start'] = agg_df['Period End'] - pd.DateOffset(days=13)
 
         else: # Weekly or Monthly logic
             freq_string = 'W-MON' if interval == 'Weekly' else 'MS'
@@ -811,38 +810,44 @@ class ChartGenerator:
             agg_df = throughput_df.groupby(grouper).agg(
                 Throughput=('Key', 'count'),
                 Details=('Work type', lambda s: '<br>'.join(f"{wt}: {count}" for wt, count in s.value_counts().items()))
-            ).reset_index().rename(columns={'Throughput Date': 'Period'})
-
+            ).reset_index()
+            
+            agg_df.rename(columns={'Throughput Date': 'Period Start'}, inplace=True)
+            
             if interval == 'Weekly':
-                agg_df['Period End'] = agg_df['Period'] + pd.DateOffset(days=6)
-            elif interval == 'Monthly':
-                agg_df['Period End'] = agg_df['Period'] + pd.offsets.MonthEnd(0)
-            else:
-                agg_df['Period End'] = agg_df['Period']
+                agg_df['Period End'] = agg_df['Period Start'] + pd.DateOffset(days=6)
+            else: # Monthly
+                agg_df['Period End'] = agg_df['Period Start'] + pd.offsets.MonthEnd(0)
+        # === END: REFACTORED AND NORMALIZED THROUGHPUT LOGIC ===
 
         agg_df = _apply_date_filter(agg_df, 'Period End', date_range, custom_start_date, custom_end_date)
         if agg_df.empty: return None
         
-        # Final filter to remove empty trailing periods
         max_date = throughput_df['Throughput Date'].max()
-        agg_df = agg_df[agg_df['Period'] <= max_date]
-
-
+        agg_df = agg_df[agg_df['Period Start'] <= max_date]
+        if agg_df.empty: return None
+        
         agg_df['Period_End_Formatted'] = agg_df['Period End'].dt.strftime('%d/%m/%Y')
         agg_df['Details'] = "<b>Breakdown:</b><br>" + agg_df['Details']
 
         title_interval = interval.replace("ly", "")
+        
+        agg_df['Period Label'] = agg_df['Period End'].dt.strftime('%Y-%m-%d')
 
-        x_axis_col = 'Period' if interval == 'Monthly' else 'Period End'
-
-        fig = px.bar(agg_df, x=x_axis_col, y="Throughput", title=f"Throughput per {title_interval}", text="Throughput")
+        fig = px.bar(agg_df, x='Period Label', y="Throughput", title=f"Throughput per {title_interval}", text="Throughput")
         fig.update_traces(
             textposition='outside',
             hovertemplate=ChartConfig.THROUGHPUT_CHART_HOVER,
             customdata=agg_df[['Period_End_Formatted', 'Details']].values
         )
-        if not agg_df.empty:
-            fig.update_layout(height=600, yaxis_range=[0, agg_df['Throughput'].max() * 1.15], xaxis_title="Period")
+
+        fig.update_layout(
+            height=600, 
+            yaxis_range=[0, agg_df['Throughput'].max() * 1.15], 
+            xaxis_title="Period Ending",
+        )
+        
+        fig.update_xaxes(categoryorder="array", categoryarray=sorted(agg_df['Period Label']))
 
         return fig
 
