@@ -583,17 +583,23 @@ class ChartGenerator:
             if i > 0:
                 fig.add_vline(x=i - 0.5, line_width=2, line_color='LightGrey')
 
-            # KEY CHANGE: Use the wip_df for accurate WIP counts
             count = len(wip_df[wip_df['Status'] == status])
             fig.add_annotation(
                 x=i, y=y_axis_max, text=f"<b>WIP = {count}</b>",
                 showarrow=False, font=dict(size=14, color="black"),
                 yanchor="bottom", yshift=5
             )
-
-        if cycle_time_percentiles and not chart_df.empty:
+        
+        # BUG FIX: Use the pre-calculated percentiles from the Cycle Time chart
+        if cycle_time_percentiles:
+            percentile_colors = ColorManager.get_percentile_colors(is_color_blind_mode)
             x_range_for_lines = [-0.5, len(status_order) - 0.5]
-            ChartGenerator._add_percentile_lines(fig, chart_df, 'Age', x_range_for_lines, percentile_settings, is_color_blind_mode)
+            for p_val in Config.PERCENTILES:
+                key = f'p{p_val}'
+                if percentile_settings.get(f"show_{p_val}th", True) and key in cycle_time_percentiles:
+                    y_value = cycle_time_percentiles[key]
+                    hover_text = f"<b>{p_val}th Percentile (from Cycle Time)</b><br>Value: {int(y_value)} days<br><i>{p_val}% of items finish in this time or less.</i>"
+                    ChartGenerator._add_hoverable_line(fig, y_value, x_range_for_lines, hover_text, percentile_colors.get(p_val), f"{p_val}th: {int(y_value)}d")
 
         return fig
 
@@ -753,23 +759,7 @@ class ChartGenerator:
 
         if throughput_df.empty:
             return None
-            
-        if len(throughput_df) > 1:
-            date_percentile_98 = throughput_df['Throughput Date'].quantile(0.98)
-            cutoff_date = date_percentile_98 + timedelta(days=30)
-            
-            future_dated_items = throughput_df[throughput_df['Throughput Date'] > cutoff_date]
-            
-            if not future_dated_items.empty:
-                outlier_keys = ", ".join(future_dated_items['Key'].astype(str).tolist())
-                st.warning(f"**Data Quality Warning:** Found and excluded {len(future_dated_items)} item(s) with completion dates that appear to be outliers (e.g., dates set far in the future). This may affect forecast accuracy. Please check the following item key(s): {outlier_keys}")
-                
-                throughput_df = throughput_df[throughput_df['Throughput Date'] <= cutoff_date]
-
-        if throughput_df.empty:
-            return None
-
-        # === START: REFACTORED AND NORMALIZED THROUGHPUT LOGIC ===
+        
         if interval == 'Fortnightly':
             if not sprint_anchor_date:
                 st.warning("For fortnightly throughput, please select a 'Sprint End Date' to set the 2-week cycle.")
@@ -793,7 +783,6 @@ class ChartGenerator:
             
             throughput_df['Period Interval'] = pd.cut(throughput_df['Throughput Date'], bins=bins, right=True, include_lowest=True, labels=bins[1:])
             
-            # Drop rows where pd.cut resulted in NaNs
             throughput_df.dropna(subset=['Period Interval'], inplace=True)
 
             agg_df = throughput_df.groupby('Period Interval').agg(
@@ -818,7 +807,6 @@ class ChartGenerator:
                 agg_df['Period End'] = agg_df['Period Start'] + pd.DateOffset(days=6)
             else: # Monthly
                 agg_df['Period End'] = agg_df['Period Start'] + pd.offsets.MonthEnd(0)
-        # === END: REFACTORED AND NORMALIZED THROUGHPUT LOGIC ===
 
         agg_df = _apply_date_filter(agg_df, 'Period End', date_range, custom_start_date, custom_end_date)
         if agg_df.empty: return None
@@ -863,13 +851,7 @@ class ChartGenerator:
 
         if len(completed_df) < 2:
             return None, None
-            
-        # Filter out outliers before calculating throughput for forecasting
-        if len(completed_df) > 1:
-            date_percentile_98 = completed_df['Forecast Completion Date'].quantile(0.98)
-            cutoff_date = date_percentile_98 + timedelta(days=30)
-            completed_df = completed_df[completed_df['Forecast Completion Date'] <= cutoff_date]
-
+        
         last_completion_date = completed_df['Forecast Completion Date'].max()
         start_of_period = last_completion_date - pd.DateOffset(weeks=25)
         recent_completed_df = completed_df[completed_df['Forecast Completion Date'] > start_of_period]
@@ -879,7 +861,6 @@ class ChartGenerator:
 
         weekly_throughput = recent_completed_df.groupby(pd.Grouper(key='Forecast Completion Date', freq='W-MON')).size()
         
-        # Ensure we don't have future empty bins
         max_date = recent_completed_df['Forecast Completion Date'].max()
         weekly_throughput = weekly_throughput[weekly_throughput.index <= max_date]
 
@@ -1363,13 +1344,18 @@ class Dashboard:
             return
 
         self.processed_df = DataProcessor.process_dates(self.raw_df, self.selections["start_col"], self.selections["completed_col"])
+        if self.processed_df is None:
+             st.warning("Could not calculate Cycle Time with the selected statuses. Please check your selections.")
+             return
+
         self.filtered_df = self._apply_all_filters(self.processed_df, apply_date_filter=True)
         cycle_stats = StatsCalculator.cycle_time_stats(self.filtered_df)
         summary_stats = StatsCalculator.summary_stats(self.filtered_df)
-
-        if self.filtered_df is None or cycle_stats is None:
-             st.warning("Could not calculate Cycle Time with the selected statuses. Please check your selections.")
-             return
+        
+        if cycle_stats is None:
+            st.warning("No completed items found for the selected criteria. Unable to display Cycle Time charts.")
+            self.filtered_df = pd.DataFrame() # Ensure filtered_df is empty so other charts don't use stale data
+            return
 
         self._display_header_and_metrics(summary_stats)
 
@@ -1479,14 +1465,13 @@ class Dashboard:
         self.selections["age_start_col"] = self.status_mapping.get(self.selections["age_start_status"])
         self.selections["age_end_col"] = self.status_mapping.get(self.selections["age_end_status"])
         self.selections["age_true_final_col"] = self.status_mapping.get(self.selections["age_true_final_status"])
-
+        
         st.divider()
 
         if not all([self.selections["age_start_col"], self.selections["age_end_col"], self.selections["age_true_final_col"]]):
             st.info("To see the chart, please select a 'Start Status for Age Calculation', an 'End Status for Axis', and a true 'Done' status from the controls above.")
             return
 
-        # 1. Determine the statuses that will be shown on the chart's X-axis
         try:
             raw_cols = list(self.raw_df.columns)
             start_idx = raw_cols.index(self.selections["age_start_col"])
@@ -1496,24 +1481,19 @@ class Dashboard:
             st.error("Could not determine status order for the chart axis. Check your axis status selections.")
             return
 
-        # 2. Get ALL items that are currently in progress
         final_col = self.selections["age_true_final_col"]
         df_in_progress = self.raw_df[self.raw_df[final_col].apply(lambda x: pd.isna(DataProcessor._extract_latest_date(x)))].copy()
 
-        # 3. Create the DataFrame for calculating WIP counts
         df_for_wip_calc = df_in_progress[df_in_progress['Status'].isin(status_order)].copy()
         df_for_wip_calc = self._apply_all_filters(df_for_wip_calc, apply_date_filter=False)
 
-        # 4. Create the DataFrame for PLOTTING
         start_col = self.selections["age_start_col"]
         df_for_plotting = df_for_wip_calc.copy()
         df_for_plotting['Start date'] = df_for_plotting[start_col].apply(DataProcessor._extract_latest_date)
         df_for_plotting.dropna(subset=['Start date'], inplace=True)
-
-        # 5. Get cycle time statistics for percentile lines
+        
         cycle_stats = StatsCalculator.cycle_time_stats(self.filtered_df) if self.filtered_df is not None and not self.filtered_df.empty else None
 
-        # 6. Generate the chart
         chart = ChartGenerator.create_work_item_age_chart(
             plot_df=df_for_plotting,
             wip_df=df_for_wip_calc,
@@ -1527,7 +1507,6 @@ class Dashboard:
         else:
             st.warning("No work items currently in progress were found based on your status selections.")
 
-        # 7. Identify and display items counted in WIP but not plotted
         plotted_keys = df_for_plotting['Key'].tolist()
         unplotted_df = df_for_wip_calc[~df_for_wip_calc['Key'].isin(plotted_keys)]
 
