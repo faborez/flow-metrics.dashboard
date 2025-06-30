@@ -590,7 +590,6 @@ class ChartGenerator:
                 yanchor="bottom", yshift=5
             )
         
-        # BUG FIX: Use the pre-calculated percentiles from the Cycle Time chart
         if cycle_time_percentiles:
             percentile_colors = ColorManager.get_percentile_colors(is_color_blind_mode)
             x_range_for_lines = [-0.5, len(status_order) - 0.5]
@@ -1440,8 +1439,9 @@ class Dashboard:
         """Displays the Work Item Age chart and its controls."""
         st.header("Work Item Age Analysis")
         st.info("""
-        - **WIP counts** at the top show all in-progress items currently in that status.
-        - **Dots** on the chart represent only those items that have passed through the selected 'Start Status for Age Calculation'.
+        - WIP counts at the top show all in-progress items currently in that status.
+        - Dots on the chart represent only those items that have passed through the selected 'Start Status for Age Calculation'.
+        - The percentile lines are based on the cycle time of completed items (from the "Cycle Time" tab) to help you gauge if aging items are approaching your typical completion times.
         - A table will appear below the chart listing any items that are included in WIP but are not plotted as a dot.
         """)
 
