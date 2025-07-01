@@ -415,6 +415,13 @@ class ChartGenerator:
             labels={'Period': interval, 'Cycle time': 'Cycle Time (Days)'},
             points='all'
         )
+        
+        # Apply the new date formatting
+        if interval == 'Monthly':
+            fig.update_xaxes(tickformat="%b %Y")
+        else:
+            fig.update_xaxes(tickformat="%d %b %Y")
+            
         fig.update_layout(height=900)
 
         ChartGenerator._add_percentile_lines(fig, df_completed, 'Cycle time', df_completed["Period"], percentile_settings, is_color_blind_mode, add_annotation=True)
@@ -747,22 +754,22 @@ class ChartGenerator:
 
     @staticmethod
     @st.cache_data
-    def create_throughput_chart(df: DataFrame, interval: str, throughput_status_col: str, date_range: str, custom_start_date: Optional[datetime], custom_end_date: Optional[datetime], sprint_anchor_date: Optional[datetime.date] = None, overall_max_date: Optional[datetime] = None) -> Optional[Figure]:
+    def create_throughput_chart(df: DataFrame, interval: str, throughput_status_col: str, date_range: str, custom_start_date: Optional[datetime], custom_end_date: Optional[datetime], sprint_anchor_date: Optional[datetime.date] = None, overall_max_date: Optional[datetime] = None) -> Optional[Tuple[Figure, DataFrame]]:
         """Creates the throughput bar chart."""
         if not throughput_status_col:
-            return None
+            return None, None
 
         throughput_df = df.copy()
         throughput_df['Throughput Date'] = throughput_df[throughput_status_col].apply(DataProcessor._extract_latest_date)
         throughput_df.dropna(subset=['Throughput Date'], inplace=True)
 
         if throughput_df.empty:
-            return None
+            return None, None
         
         if interval == 'Fortnightly':
             if not sprint_anchor_date:
                 st.warning("For fortnightly throughput, please select a 'Sprint End Date' to set the 2-week cycle.")
-                return None
+                return None, None
 
             anchor = pd.to_datetime(sprint_anchor_date)
             min_date, max_date_in_data = throughput_df['Throughput Date'].min(), throughput_df['Throughput Date'].max()
@@ -808,19 +815,23 @@ class ChartGenerator:
                 agg_df['Period End'] = agg_df['Period Start'] + pd.offsets.MonthEnd(0)
 
         agg_df = _apply_date_filter(agg_df, 'Period End', date_range, custom_start_date, custom_end_date)
-        if agg_df.empty: return None
+        if agg_df.empty: return None, None
         
-        # This is the corrected trimming logic
         if overall_max_date:
             agg_df = agg_df[agg_df['Period Start'] <= overall_max_date]
-        if agg_df.empty: return None
+        if agg_df.empty: return None, None
+        
+        agg_df = agg_df.sort_values(by='Period Start')
         
         agg_df['Period_End_Formatted'] = agg_df['Period End'].dt.strftime('%d/%m/%Y')
         agg_df['Details'] = "<b>Breakdown:</b><br>" + agg_df['Details']
 
         title_interval = interval.replace("ly", "")
         
-        agg_df['Period Label'] = agg_df['Period End'].dt.strftime('%Y-%m-%d')
+        if interval == 'Monthly':
+            agg_df['Period Label'] = agg_df['Period End'].dt.strftime('%b %Y')
+        else:
+            agg_df['Period Label'] = agg_df['Period End'].dt.strftime('%d %b %Y')
 
         fig = px.bar(agg_df, x='Period Label', y="Throughput", title=f"Throughput per {title_interval}", text="Throughput")
         fig.update_traces(
@@ -835,9 +846,9 @@ class ChartGenerator:
             xaxis_title="Period Ending",
         )
         
-        fig.update_xaxes(categoryorder="array", categoryarray=sorted(agg_df['Period Label']))
+        fig.update_xaxes(categoryorder="array", categoryarray=agg_df['Period Label'].tolist())
 
-        return fig
+        return fig, agg_df
 
     @staticmethod
     @st.cache_data(show_spinner="Running simulations...")
@@ -1584,17 +1595,18 @@ class Dashboard:
 
         st.divider()
 
-        # This is the main data source, filtered by work type, etc.
         source_df = self._apply_all_filters(self.raw_df, apply_date_filter=False)
-
-        # BUG FIX: Calculate the max date from the full dataset (before work-type filtering) to get a consistent axis.
+        
         max_date_df = self.raw_df.copy()
-        max_date_df['Throughput Date'] = max_date_df[self.selections['throughput_status_col']].apply(DataProcessor._extract_latest_date)
-        max_date_df.dropna(subset=['Throughput Date'], inplace=True)
-        overall_max_date = max_date_df['Throughput Date'].max() if not max_date_df.empty else None
+        if self.selections['throughput_status_col']:
+            max_date_df['Throughput Date'] = max_date_df[self.selections['throughput_status_col']].apply(DataProcessor._extract_latest_date)
+            max_date_df.dropna(subset=['Throughput Date'], inplace=True)
+            overall_max_date = max_date_df['Throughput Date'].max() if not max_date_df.empty else None
+        else:
+            overall_max_date = None
 
 
-        chart = ChartGenerator.create_throughput_chart(
+        chart, agg_df = ChartGenerator.create_throughput_chart(
             source_df,
             self.selections["throughput_interval"],
             self.selections['throughput_status_col'],
@@ -1604,8 +1616,14 @@ class Dashboard:
             sprint_anchor_date=self.selections.get('sprint_anchor_date'),
             overall_max_date=overall_max_date
         )
+        
         if chart:
-            st.plotly_chart(chart, use_container_width=True)
+            if agg_df is not None and len(agg_df) < 10:
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.plotly_chart(chart, use_container_width=True)
+            else:
+                st.plotly_chart(chart, use_container_width=True)
         else:
             st.warning("⚠️ No items with the selected throughput status for this chart.")
 
