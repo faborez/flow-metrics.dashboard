@@ -1149,6 +1149,37 @@ class Dashboard:
             'Start date': [date_df['Date'].min()],
             'Completed date': [date_df['Date'].max()]
         })
+        
+    def _handle_multiselect(self, key):
+        """Manages the 'All' option for a multiselect widget in session state."""
+        # Ensure the key for tracking the previous state exists
+        prev_key = f"prev_{key}"
+        if prev_key not in st.session_state:
+            st.session_state[prev_key] = st.session_state[key]
+            
+        current_selection = st.session_state[key]
+        previous_selection = st.session_state[prev_key]
+
+        # If nothing changed, do nothing.
+        if current_selection == previous_selection:
+            return
+
+        all_was_selected = "All" in previous_selection
+        all_is_selected = "All" in current_selection
+
+        # Case 1: "All" was just selected. It becomes the only item.
+        if not all_was_selected and all_is_selected:
+            st.session_state[key] = ["All"]
+        # Case 2: A specific item was added while "All" was already there. Remove "All".
+        elif all_was_selected and len(current_selection) > 1:
+            st.session_state[key] = [s for s in current_selection if s != "All"]
+        # Case 3: Everything was deselected. Default back to "All".
+        elif not current_selection:
+            st.session_state[key] = ["All"]
+
+        # Update the previous state for the next interaction
+        st.session_state[prev_key] = st.session_state[key]
+
 
     def _display_sidebar(self, date_bounds_df: DataFrame):
         """Displays the sidebar for user configuration and filters."""
@@ -1164,7 +1195,23 @@ class Dashboard:
     def _sidebar_global_filters(self, date_bounds_df: DataFrame):
         """Controls for filtering the global dataset."""
         st.sidebar.markdown("#### 📋 Global Data Filters")
-        self.selections["work_types"] = st.sidebar.multiselect("Work Item Type", options=["All"] + ChartGenerator._order_work_types(self.raw_df), default=["All"], help="Select one or more work types.") or ["All"]
+        
+        # --- Work Item Type Filter with interactive 'All' ---
+        work_type_key = 'work_types'
+        if work_type_key not in st.session_state:
+            st.session_state[work_type_key] = ['All']
+
+        st.sidebar.multiselect(
+            "Work Item Type",
+            options=["All"] + ChartGenerator._order_work_types(self.raw_df),
+            key=work_type_key,
+            on_change=self._handle_multiselect,
+            args=(work_type_key,),
+            help="Select one or more work types."
+        )
+        self.selections[work_type_key] = st.session_state[work_type_key]
+        
+        # --- Date Range Filter ---
         self.selections["date_range"] = st.sidebar.selectbox("Date Range", Config.DATE_RANGES, index=0)
         self.selections["custom_start_date"], self.selections["custom_end_date"] = None, None
 
@@ -1199,7 +1246,18 @@ class Dashboard:
                 if f_type == "single":
                     self.selections[f_name] = st.sidebar.selectbox(f_name, ["All"] + unique_vals, key=f"filter_{f_name}")
                 else:
-                    self.selections[f_name] = st.sidebar.multiselect(f_name, ["All"] + unique_vals, default=["All"], key=f"filter_{f_name}")
+                    session_key = f"selection_{f_name}"
+                    if session_key not in st.session_state:
+                        st.session_state[session_key] = ['All']
+
+                    st.sidebar.multiselect(
+                        f_name, 
+                        ["All"] + unique_vals, 
+                        key=session_key, 
+                        on_change=self._handle_multiselect, 
+                        args=(session_key,)
+                    )
+                    self.selections[f_name] = st.session_state[session_key]
 
     def _sidebar_chart_controls(self):
         """Controls for customizing individual charts."""
