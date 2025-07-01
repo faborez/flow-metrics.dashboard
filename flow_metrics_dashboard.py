@@ -747,7 +747,7 @@ class ChartGenerator:
 
     @staticmethod
     @st.cache_data
-    def create_throughput_chart(df: DataFrame, interval: str, throughput_status_col: str, date_range: str, custom_start_date: Optional[datetime], custom_end_date: Optional[datetime], sprint_anchor_date: Optional[datetime.date] = None) -> Optional[Figure]:
+    def create_throughput_chart(df: DataFrame, interval: str, throughput_status_col: str, date_range: str, custom_start_date: Optional[datetime], custom_end_date: Optional[datetime], sprint_anchor_date: Optional[datetime.date] = None, overall_max_date: Optional[datetime] = None) -> Optional[Figure]:
         """Creates the throughput bar chart."""
         if not throughput_status_col:
             return None
@@ -810,8 +810,9 @@ class ChartGenerator:
         agg_df = _apply_date_filter(agg_df, 'Period End', date_range, custom_start_date, custom_end_date)
         if agg_df.empty: return None
         
-        max_date = throughput_df['Throughput Date'].max()
-        agg_df = agg_df[agg_df['Period Start'] <= max_date]
+        # This is the corrected trimming logic
+        if overall_max_date:
+            agg_df = agg_df[agg_df['Period Start'] <= overall_max_date]
         if agg_df.empty: return None
         
         agg_df['Period_End_Formatted'] = agg_df['Period End'].dt.strftime('%d/%m/%Y')
@@ -1335,6 +1336,7 @@ class Dashboard:
 
         if not self.selections["start_col"] or not self.selections["completed_col"]:
             st.info("To see your charts, please choose a 'Starting Status' and a 'Done Status' from the dropdowns above.")
+            self.filtered_df = pd.DataFrame()
             return
 
         is_valid, error_msg = StatusManager.validate_status_order(self.raw_df, self.selections["start_col"], self.selections["completed_col"])
@@ -1582,7 +1584,15 @@ class Dashboard:
 
         st.divider()
 
+        # This is the main data source, filtered by work type, etc.
         source_df = self._apply_all_filters(self.raw_df, apply_date_filter=False)
+
+        # BUG FIX: Calculate the max date from the full dataset (before work-type filtering) to get a consistent axis.
+        max_date_df = self.raw_df.copy()
+        max_date_df['Throughput Date'] = max_date_df[self.selections['throughput_status_col']].apply(DataProcessor._extract_latest_date)
+        max_date_df.dropna(subset=['Throughput Date'], inplace=True)
+        overall_max_date = max_date_df['Throughput Date'].max() if not max_date_df.empty else None
+
 
         chart = ChartGenerator.create_throughput_chart(
             source_df,
@@ -1591,7 +1601,8 @@ class Dashboard:
             self.selections['date_range'],
             self.selections['custom_start_date'],
             self.selections['custom_end_date'],
-            sprint_anchor_date=self.selections.get('sprint_anchor_date')
+            sprint_anchor_date=self.selections.get('sprint_anchor_date'),
+            overall_max_date=overall_max_date
         )
         if chart:
             st.plotly_chart(chart, use_container_width=True)
