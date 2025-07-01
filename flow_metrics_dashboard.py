@@ -1152,32 +1152,27 @@ class Dashboard:
         
     def _handle_multiselect(self, key):
         """Manages the 'All' option for a multiselect widget in session state."""
-        # Ensure the key for tracking the previous state exists
         prev_key = f"prev_{key}"
+        
         if prev_key not in st.session_state:
             st.session_state[prev_key] = st.session_state[key]
             
         current_selection = st.session_state[key]
         previous_selection = st.session_state[prev_key]
 
-        # If nothing changed, do nothing.
         if current_selection == previous_selection:
             return
 
         all_was_selected = "All" in previous_selection
         all_is_selected = "All" in current_selection
 
-        # Case 1: "All" was just selected. It becomes the only item.
         if not all_was_selected and all_is_selected:
             st.session_state[key] = ["All"]
-        # Case 2: A specific item was added while "All" was already there. Remove "All".
         elif all_was_selected and len(current_selection) > 1:
             st.session_state[key] = [s for s in current_selection if s != "All"]
-        # Case 3: Everything was deselected. Default back to "All".
         elif not current_selection:
             st.session_state[key] = ["All"]
 
-        # Update the previous state for the next interaction
         st.session_state[prev_key] = st.session_state[key]
 
 
@@ -1195,6 +1190,7 @@ class Dashboard:
     def _sidebar_global_filters(self, date_bounds_df: DataFrame):
         """Controls for filtering the global dataset."""
         st.sidebar.markdown("#### 📋 Global Data Filters")
+        st.sidebar.caption("ℹ️ *In the multi-select filters, choosing 'All' will deselect any other options. Likewise, choosing a specific option will deselect 'All'.*")
         
         # --- Work Item Type Filter with interactive 'All' ---
         work_type_key = 'work_types'
@@ -1239,7 +1235,6 @@ class Dashboard:
         st.sidebar.caption("Note: Date Range does not apply to the Work Item Age chart.")
 
         st.sidebar.markdown("#### Optional Filters")
-        st.sidebar.caption("These will show depending on your data set")
         for f_name, f_type in Config.OPTIONAL_FILTERS.items():
             if f_name in self.raw_df.columns:
                 unique_vals = self._get_unique_values(self.raw_df[f_name], f_type)
@@ -1249,7 +1244,7 @@ class Dashboard:
                     session_key = f"selection_{f_name}"
                     if session_key not in st.session_state:
                         st.session_state[session_key] = ['All']
-
+                    
                     st.sidebar.multiselect(
                         f_name, 
                         ["All"] + unique_vals, 
