@@ -1112,6 +1112,15 @@ class Dashboard:
     def run(self):
         """Executes the main dashboard workflow."""
         st.cache_data.clear()
+        st.markdown("""
+            <style>
+                [data-testid="stTabs"] button {
+                    font-size: 16px;
+                    font-weight: bold;
+                    padding: 10px 15px;
+                }
+            </style>
+        """, unsafe_allow_html=True)
         with st.spinner("🔄 Processing JIRA export..."):
             loaded_df = DataProcessor.load_data(self.uploaded_file)
             if loaded_df is None: return
@@ -1259,7 +1268,7 @@ class Dashboard:
         st.sidebar.markdown("### Accessibility")
         self.selections['color_blind_mode'] = st.sidebar.checkbox("Enable Color-Blind Friendly Mode")
 
-        with st.sidebar.expander("📈 Cycle Time & Age Percentiles"):
+        with st.expander("📈 Cycle Time & Age Percentiles"):
             show_percentiles = st.checkbox("Show Percentile Lines", value=True)
             self.selections["percentiles"] = {f"show_{p}th": show_percentiles for p in Config.PERCENTILES}
             if show_percentiles:
@@ -1302,9 +1311,15 @@ class Dashboard:
     def _display_header_and_metrics(self, stats: Dict):
         """Displays metrics and filters that depend on a configured cycle time."""
         st.info(f"📊 **Cycle Time Configuration:** Starting: **{self.selections['start_status']}** | Done: **{self.selections['completed_status']}**")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("📊 Total Items in Filter", stats['total']); c2.metric("✅ Completed in Filter", stats['completed']); c3.metric("🔄 In Progress in Filter", stats['in_progress'])
+        with st.expander("Cycle Time Data Summary"):
+            c1, c2, c3 = st.columns(3)
+            c1.metric("📊 Total Items in Filter", stats['total'])
+            c2.metric("✅ Completed Items", stats['completed'])
+            c3.metric("🔄 Still In Progress", stats['in_progress'])
+        
         st.info("ℹ️ **Cycle Time Formula:** (Done Date - Starting Date) + 1 days")
+        st.caption("We add one day to be inclusive. This ensures that an item started and completed on the same day has a cycle time of 1 day, not 0.")
+
         active_filters = [format_multiselect_display(self.selections['work_types'], 'Work types')]
         for f_name, f_type in Config.OPTIONAL_FILTERS.items():
             selection = self.selections.get(f_name)
