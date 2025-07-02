@@ -1268,7 +1268,7 @@ class Dashboard:
         st.sidebar.markdown("### Accessibility")
         self.selections['color_blind_mode'] = st.sidebar.checkbox("Enable Color-Blind Friendly Mode")
 
-        with st.expander("📈 Cycle Time & Age Percentiles"):
+        with st.sidebar.expander("📈 Cycle Time & Age Percentiles"):
             show_percentiles = st.checkbox("Show Percentile Lines", value=True)
             self.selections["percentiles"] = {f"show_{p}th": show_percentiles for p in Config.PERCENTILES}
             if show_percentiles:
@@ -1359,8 +1359,18 @@ class Dashboard:
     def _display_cfd_chart(self):
         """Displays the Cumulative Flow Diagram and its controls."""
         st.header("Process Stability & Flow")
+        st.markdown('<div class="styled-expander">', unsafe_allow_html=True)
+        with st.expander("Learn more about this chart", icon="🎓"):
+             st.markdown("""
+                - **What it is:** This chart shows the cumulative number of work items in each stage of your workflow over time.
+                - **How to read it:** Each colored area represents a stage in your workflow. The vertical distance between the lines shows the number of items in that stage on a given day.
+                - **What patterns to look for:**
+                    - **Widening Bands:** If a colored band is getting wider over time, it indicates that more work is arriving in that stage than is leaving it. This is a classic sign of a bottleneck.
+                    - **Flat Bands:** If all bands are flat, it means no work is being completed.
+                    - **Parallel Bands:** If the top and bottom lines of the chart are moving in parallel, it generally indicates a stable flow.
+            """)
+        st.markdown('</div>', unsafe_allow_html=True)
         with st.expander("Cumulative Flow Diagram (CFD) Controls", expanded=True):
-            st.markdown("A Cumulative Flow Diagram (CFD) shows the number of work items in each stage of a workflow over time. Use it to identify bottlenecks, track Work in Progress (WIP), and measure approximate cycle time.")
 
             all_statuses = list(self.status_mapping.keys())
 
@@ -1396,6 +1406,17 @@ class Dashboard:
     def _display_cycle_time_charts(self):
         """Displays the Cycle Time charts and statistics."""
         st.header("Cycle Time Analysis")
+        st.markdown('<div class="styled-expander">', unsafe_allow_html=True)
+        with st.expander("Learn more about these charts", icon="🎓"):
+            st.markdown("""
+                - **What it is:** These charts help visualize the consistency of your team's delivery over time.
+                - **How to read it:** Each dot is a completed work item. The vertical position of a dot shows its Cycle Time, and the horizontal position shows its completion date. Percentile lines show the percentage of work items that were completed in that time or less. For example, the 85th percentile line shows the point at which 85% of items were completed.
+                - **What patterns to look for:**
+                    - **Clusters of dots** can indicate a change in your process or team that affected delivery speed.
+                    - **Gaps in the data** (where no dots appear) may suggest that work is being delivered in large batches rather than a smooth flow, often at the end of a release cycle.
+                    - **Outliers** (dots with very high Cycle Times) often represent items that were blocked by external dependencies or were too large to begin with.
+                """)
+        st.markdown('</div>', unsafe_allow_html=True)
 
         status_options = ["None"] + list(self.status_mapping.keys())
         col1, col2, col3 = st.columns(3)
@@ -1458,10 +1479,12 @@ class Dashboard:
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("No completed items in the selected date range could be found to display on this chart.")
         with ct_tabs[3]:
+            st.subheader("Distribution (Histogram)")
             chart = ChartGenerator.create_cycle_time_histogram(self.filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("No completed items in the selected date range could be found to display on this chart.")
         with ct_tabs[4]:
+            st.subheader("Time in Status")
             st.markdown("This chart shows the average time items spend in each status column of your raw data export.")
             status_cols = list(self.status_mapping.values())
             chart, chart_data = ChartGenerator.create_time_in_status_chart(self.filtered_df, status_cols)
@@ -1519,6 +1542,17 @@ class Dashboard:
     def _display_work_item_age_chart(self):
         """Displays the Work Item Age chart and its controls."""
         st.header("Work Item Age Analysis")
+        st.markdown('<div class="styled-expander">', unsafe_allow_html=True)
+        with st.expander("Learn more about this chart", icon="🎓"):
+            st.markdown("""
+            - **What it is:** This chart shows all the items that are currently in progress, their current status (column), and how long they have been in progress (their Age).
+            - **How to read it:** Each dot is a work item that has started but not yet finished. Its vertical position shows its current age in days.
+            - **What to look for:**
+                - **The oldest items first.** The most important question in a Daily Stand-up is "what's the oldest thing we are working on, and what are we doing to get it moving?"
+                - **Items nearing or crossing percentile lines.** The percentile lines are taken from your historical Cycle Time data. If an item's age is approaching the 85th percentile, it is at high risk of taking longer than 85% of all your previous items. This is a crucial signal to the team to intervene by swarming on the item or breaking it down.
+            """)
+        st.markdown('</div>', unsafe_allow_html=True)
+        
         st.info("""
         - WIP counts at the top show all in-progress items currently in that status.
         - Dots on the chart represent only those items that have passed through the selected 'Start Status for Age Calculation'.
@@ -1633,6 +1667,16 @@ class Dashboard:
     def _display_throughput_chart(self):
         """Displays the Throughput chart and its controls."""
         st.header("Throughput")
+        st.markdown('<div class="styled-expander">', unsafe_allow_html=True)
+        with st.expander("Learn more about this chart", icon="🎓"):
+            st.markdown("""
+            - **What it is:** This chart shows the number of work items completed per unit of time (day, week, or fortnight).
+            - **How to read it:** Each bar represents a time period, and its height shows the number of items that were completed in that period.
+            - **What to look for:**
+                - **Consistency:** A relatively consistent throughput over time indicates a stable and predictable process.
+                - **Variability:** High variability (large spikes and drops) can suggest that work items are not "right-sized" or that the team is being affected by outside interruptions or dependencies.
+            """)
+        st.markdown('</div>', unsafe_allow_html=True)
         st.markdown("Throughput measures the number of work items completed per unit of time. Use the control below to change the time unit.")
 
         col1, col2, col3 = st.columns(3)
@@ -1698,6 +1742,15 @@ class Dashboard:
     def _display_forecast_charts(self):
         """Displays the Forecasting charts and controls."""
         st.header("Throughput Forecasting")
+        st.markdown('<div class="styled-expander">', unsafe_allow_html=True)
+        with st.expander("Learn more about this chart", icon="🎓"):
+            st.markdown("""
+            - **What it is:** These charts use a Monte Carlo simulation to forecast future outcomes based on your team's historical throughput data.
+            - **How to read it:** The charts run thousands of simulations of your future work to generate a range of possible outcomes and the probability of achieving them. For example, a result might say "There is an 85% chance of completing 12 or more items in the next two weeks."
+            - **Why use Monte Carlo?** Traditional forecasting uses simple averages, which can be misleading and hide risk (this is known as the "Flaw of Averages"). A Monte Carlo simulation is a more robust statistical method that accounts for the variability in your past performance. By running thousands of simulations, it provides a much more realistic and trustworthy range of future outcomes and the probabilities associated with them.
+            - **A Note on "Right-Sizing":** Forecasts are most reliable when the work items are "right-sized." Based on the guidance from industry experts, this means each item should be broken down into the smallest possible chunk that still delivers value and can be completed within your team's Service Level Expectation (SLE).
+            """)
+        st.markdown('</div>', unsafe_allow_html=True)
 
         throughput_status = self.selections.get('throughput_status')
         if not throughput_status or throughput_status == "None":
