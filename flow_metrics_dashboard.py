@@ -84,12 +84,21 @@ class Config:
     THROUGHPUT_INTERVALS = ["Weekly", "Fortnightly", "Monthly"]
     FORECASTING_SIMULATIONS = 10000
     FORECAST_DATE_RANGES = ["Next 30 days", "Next 60 days", "Next 90 days", "Custom"]
-
-    OPTIONAL_FILTERS = {
+    
+    ### NEW FEATURE ###
+    # This dictionary now acts as a HINT for how to display a filter if it's available.
+    # It does not dictate WHICH filters appear. 'single' = st.selectbox, 'multi' = st.multiselect.
+    FILTER_TYPE_HINTS = {
         "Team": "single", "Labels": "multi", "Components": "multi",
         "High Level Estimate-DPID": "multi", "RAG-DPID": "multi"
     }
+    
+    ### NEW FEATURE ###
+    # Columns to permanently exclude from the dynamic filter list.
+    FILTER_EXCLUSIONS = ['Key', 'Summary', 'Created', 'Updated', 'Resolved', 'Last viewed']
+    
     DEFAULT_COLOR = '#808080'
+
 
 class ChartConfig:
     """Centralized configuration for chart templates and layouts."""
@@ -155,6 +164,8 @@ class DataProcessor:
         encodings = ['utf-8', 'latin1', 'iso-8859-1']
         for encoding in encodings:
             try:
+                # Store original file position
+                uploaded_file.seek(0)
                 df = pd.read_csv(uploaded_file, keep_default_na=False, encoding=encoding)
                 df = df.dropna(how='all')
 
@@ -480,7 +491,6 @@ class ChartGenerator:
                 continue
 
             temp_df['duration'] = (temp_df['next_date'] - temp_df['current_date']).dt.days
-
             valid_durations = temp_df[temp_df['duration'] >= 0]
 
             if not valid_durations.empty:
@@ -999,7 +1009,7 @@ class ChartGenerator:
         return fig, percentile_dates
 
     @staticmethod
-    @st.cache_data
+    @st.cache_data(show_spinner="Running 'When' simulations...")
     def run_when_scenario_forecast(df: DataFrame, items_to_complete: int, start_date: datetime.date, throughput_status_col: str) -> Optional[Dict]:
         """Runs the good week/bad week scenario analysis and returns the results."""
         weekly_throughput, normalized_weights = ChartGenerator._get_recent_weekly_throughput(df, throughput_status_col)
@@ -1108,6 +1118,8 @@ class Dashboard:
         self.raw_df, self.processed_df, self.filtered_df = None, None, None
         self.status_mapping = {}
         self.selections = {}
+        ### NEW FEATURE ###
+        self.filterable_columns = []
 
     def run(self):
         """Executes the main dashboard workflow."""
@@ -1144,10 +1156,39 @@ class Dashboard:
             return
 
         date_bounds_df = self._pre_process_for_sidebar()
+        
+        ### NEW FEATURE ###
+        # Determine which columns are available for dynamic filtering
+        self.filterable_columns = self._get_filterable_columns()
 
         self._display_sidebar(date_bounds_df)
 
         self._display_charts()
+
+    ### NEW FEATURE ###
+    def _get_filterable_columns(self) -> List[str]:
+        """Identifies columns in the dataframe that can be used for filtering."""
+        # Rule 3: Get status-related columns
+        status_date_cols = list(self.status_mapping.values())
+        # Rule 4: Get the base names of status columns
+        status_base_names = list(self.status_mapping.keys())
+        
+        # Combine all columns that should be excluded
+        exclusions = set(Config.FILTER_EXCLUSIONS + status_date_cols + status_base_names)
+        
+        # Identify potential filterable columns (not in exclusion list)
+        potential_filters = [
+            col for col in self.raw_df.columns 
+            if col not in exclusions and col not in ['Work type']
+        ]
+        
+        # Further filter out columns that are all empty/NA
+        final_filters = [
+            col for col in potential_filters 
+            if self.raw_df[col].replace('', np.nan).notna().any()
+        ]
+        
+        return sorted(final_filters)
 
     def _pre_process_for_sidebar(self) -> DataFrame:
         """A light processing step to get all possible dates for sidebar validation."""
@@ -1255,14 +1296,32 @@ class Dashboard:
         self.selections["exclude_long_cycle_times"] = st.sidebar.checkbox("Exclude cycle time > 365 days", value=False)
         st.sidebar.caption("Note: Date Range does not apply to the Work Item Age chart.")
 
-        st.sidebar.markdown("#### Optional Filters")
-        for f_name, f_type in Config.OPTIONAL_FILTERS.items():
-            if f_name in self.raw_df.columns:
-                unique_vals = self._get_unique_values(self.raw_df[f_name], f_type)
-                if f_type == "single":
+        ### NEW FEATURE ###
+        # Dynamic filter selection
+        st.sidebar.markdown("#### Dynamic Column Filters")
+        if not self.filterable_columns:
+            st.sidebar.info("No additional filterable columns found in your data file.")
+        else:
+            if 'dynamic_filters_to_show' not in st.session_state:
+                st.session_state.dynamic_filters_to_show = []
+
+            st.sidebar.multiselect(
+                "Select Additional Filters",
+                options=self.filterable_columns,
+                key='dynamic_filters_to_show',
+                help="Choose which columns from your file to use as filters. None are shown by default."
+            )
+            
+            # Create the actual filter widgets based on the user's selection
+            for f_name in st.session_state.dynamic_filters_to_show:
+                filter_type = Config.FILTER_TYPE_HINTS.get(f_name, "multi") # Default to multi-select
+                unique_vals = self._get_unique_values(self.raw_df[f_name], filter_type)
+                
+                session_key = f"selection_{f_name}"
+                
+                if filter_type == "single":
                     self.selections[f_name] = st.sidebar.selectbox(f_name, ["All"] + unique_vals, key=f"filter_{f_name}")
-                else:
-                    session_key = f"selection_{f_name}"
+                else: # multi
                     if session_key not in st.session_state:
                         st.session_state[session_key] = ['All']
                     
@@ -1274,6 +1333,7 @@ class Dashboard:
                         args=(session_key,)
                     )
                     self.selections[f_name] = st.session_state[session_key]
+
 
     def _sidebar_chart_controls(self):
         """Controls for customizing individual charts."""
@@ -1305,15 +1365,23 @@ class Dashboard:
 
         if "All" not in self.selections.get("work_types", ["All"]):
             df = df[df["Work type"].isin(self.selections["work_types"])]
+        
+        ### NEW FEATURE ###
+        # Iterate over the dynamically created filters that the user has chosen to display
+        if 'dynamic_filters_to_show' in st.session_state:
+            for f_name in st.session_state.dynamic_filters_to_show:
+                filter_type = Config.FILTER_TYPE_HINTS.get(f_name, "multi")
+                selection = self.selections.get(f_name)
 
-        for f_name, f_type in Config.OPTIONAL_FILTERS.items():
-            selection = self.selections.get(f_name)
-            if selection and f_name in df.columns:
-                if f_type == "single" and selection != "All":
-                    df = df[df[f_name] == selection]
-                elif f_type == "multi" and "All" not in selection:
-                    pattern = '|'.join(re.escape(str(s)) for s in selection)
-                    df = df[df[f_name].str.contains(pattern, na=False)]
+                if selection and f_name in df.columns:
+                    if filter_type == "single" and selection != "All":
+                        df = df[df[f_name] == selection]
+                    elif filter_type == "multi" and "All" not in selection:
+                        # Ensure pattern matching works for items that might be substrings of others
+                        # e.g., filtering for "API" doesn't also catch "APIService" unless intended
+                        pattern = '|'.join(r'\b' + re.escape(str(s)) + r'\b' for s in selection)
+                        df = df[df[f_name].astype(str).str.contains(pattern, na=False, regex=True)]
+
 
         if apply_date_filter and 'Completed date' in df.columns:
             df = _apply_date_filter(df, 'Completed date', self.selections["date_range"], self.selections["custom_start_date"], self.selections["custom_end_date"])
@@ -1333,16 +1401,21 @@ class Dashboard:
         st.caption("We add one day to be inclusive. This ensures that an item started and completed on the same day has a cycle time of 1 day, not 0.")
 
         active_filters = [format_multiselect_display(self.selections['work_types'], 'Work types')]
-        for f_name, f_type in Config.OPTIONAL_FILTERS.items():
-            selection = self.selections.get(f_name)
-            if isinstance(selection, list) and "All" not in selection and selection:
-                active_filters.append(f"{f_name}: {format_multiselect_display(selection, '')}")
-            elif isinstance(selection, str) and selection != "All":
-                 active_filters.append(f"{f_name}: {selection}")
+        
+        ### NEW FEATURE ###
+        # Display active dynamic filters
+        if 'dynamic_filters_to_show' in st.session_state:
+            for f_name in st.session_state.dynamic_filters_to_show:
+                selection = self.selections.get(f_name)
+                if isinstance(selection, list) and "All" not in selection and selection:
+                    active_filters.append(f"{f_name}: {format_multiselect_display(selection, '')}")
+                elif isinstance(selection, str) and selection != "All":
+                    active_filters.append(f"{f_name}: {selection}")
 
         date_range_display = f"from {self.selections['custom_start_date'].strftime('%Y-%m-%d')} to {self.selections['custom_end_date'].strftime('%Y-%m-%d')}" if self.selections['date_range'] == "Custom" and self.selections['custom_start_date'] and self.selections['custom_end_date'] else self.selections['date_range']
         active_filters.append(date_range_display)
         st.markdown(f"**🎯 Showing:** {' | '.join(filter(None, active_filters))}")
+
 
     def _display_charts(self):
         """Displays the main chart area with tabs."""
