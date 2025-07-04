@@ -335,7 +335,7 @@ class ChartGenerator:
         fig = go.Figure()
         for work_type in ChartGenerator._order_work_types(chart_df):
             df_type = chart_df[chart_df['Work type'] == work_type]
-            fig.add_trace(go.Scatter(
+            fig.add_trace(go.Scattergl(
                 x=df_type['Completed date'], y=df_type['Cycle_time_jittered'],
                 mode='markers', name=work_type,
                 marker=dict(color=work_type_colors.get(work_type, Config.DEFAULT_COLOR), size=8, opacity=0.7),
@@ -343,7 +343,7 @@ class ChartGenerator:
                 hovertemplate=ChartConfig.CYCLE_TIME_HOVER
             ))
 
-        fig.update_layout(title="Cycle Time Scatterplot", xaxis_title="Completed Date", yaxis_title="Cycle Time (Days)", height=900, legend_title="Work Type")
+        fig.update_layout(title="Cycle Time Scatterplot", xaxis_title="Completed Date", yaxis_title="Cycle Time (Days)", height=675, legend_title="Work Type")
 
         ChartGenerator._add_percentile_lines(fig, chart_df, 'Cycle time', chart_df["Completed date"], percentile_settings, is_color_blind_mode)
 
@@ -551,7 +551,7 @@ class ChartGenerator:
         if not chart_df.empty:
             for work_type in ChartGenerator._order_work_types(chart_df):
                 df_type = chart_df[chart_df['Work type'] == work_type]
-                fig.add_trace(go.Scatter(
+                fig.add_trace(go.Scattergl(
                     x=df_type['Status_Jittered'],
                     y=df_type['Age'],
                     mode='markers',
@@ -567,7 +567,7 @@ class ChartGenerator:
         fig.update_layout(
             title="Work Item Age Analysis",
             yaxis_title="<b>Age (Calendar Days)</b>",
-            height=900, legend_title="Work Type",
+            height=675, legend_title="Work Type",
             xaxis=dict(
                 title_text="",
                 tickvals=list(range(len(status_order))),
@@ -639,7 +639,7 @@ class ChartGenerator:
         fig = go.Figure()
         for work_type in ChartGenerator._order_work_types(chart_df):
             df_type = chart_df[chart_df['Work type'] == work_type]
-            fig.add_trace(go.Scatter(
+            fig.add_trace(go.Scattergl(
                 x=df_type[sp_col_name], y=df_type['Cycle_time_jittered'],
                 mode='markers', name=work_type,
                 marker=dict(color=work_type_colors.get(work_type, Config.DEFAULT_COLOR), size=8, opacity=0.7),
@@ -661,7 +661,7 @@ class ChartGenerator:
             title="Story Point Correlation",
             xaxis_title="Story Points",
             yaxis_title="Cycle Time (Days)",
-            height=900,
+            height=675,
             legend_title="Work Type",
             legend=dict(yanchor="top", y=1, xanchor="left", x=1.02)
         )
@@ -675,7 +675,7 @@ class ChartGenerator:
         return fig
 
     @staticmethod
-    def _add_percentile_lines(fig: go.Figure, df: pd.DataFrame, y_col: str, x_data, percentile_settings: Dict[str, bool], is_color_blind_mode: bool, add_annotation: bool = False):
+    def _add_percentile_lines(fig: Figure, df: pd.DataFrame, y_col: str, x_data, percentile_settings: Dict[str, bool], is_color_blind_mode: bool, add_annotation: bool = False):
         """Helper to add percentile lines to a chart."""
         if df.empty:
             return
@@ -1119,6 +1119,18 @@ class Dashboard:
                     font-weight: bold;
                     padding: 10px 15px;
                 }
+                .styled-expander div[data-testid="stExpander"] {
+                    border: none !important;
+                    box-shadow: none !important;
+                    background-color: #E6E6FA;
+                    border-radius: 8px;
+                }
+                .styled-expander div[data-testid="stExpander"] summary {
+                    background-color: #E6E6FA;
+                    font-size: 1.1em !important;
+                    font-style: italic !important;
+                    font-weight: bold !important;
+                }
             </style>
         """, unsafe_allow_html=True)
         with st.spinner("🔄 Processing JIRA export..."):
@@ -1552,7 +1564,6 @@ class Dashboard:
                 - **Items nearing or crossing percentile lines.** The percentile lines are taken from your historical Cycle Time data. If an item's age is approaching the 85th percentile, it is at high risk of taking longer than 85% of all your previous items. This is a crucial signal to the team to intervene by swarming on the item or breaking it down.
             """)
         st.markdown('</div>', unsafe_allow_html=True)
-        
         st.info("""
         - WIP counts at the top show all in-progress items currently in that status.
         - Dots on the chart represent only those items that have passed through the selected 'Start Status for Age Calculation'.
