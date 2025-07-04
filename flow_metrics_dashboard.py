@@ -85,16 +85,11 @@ class Config:
     FORECASTING_SIMULATIONS = 10000
     FORECAST_DATE_RANGES = ["Next 30 days", "Next 60 days", "Next 90 days", "Custom"]
     
-    ### NEW FEATURE ###
-    # This dictionary now acts as a HINT for how to display a filter if it's available.
-    # It does not dictate WHICH filters appear. 'single' = st.selectbox, 'multi' = st.multiselect.
     FILTER_TYPE_HINTS = {
         "Team": "single", "Labels": "multi", "Components": "multi",
         "High Level Estimate-DPID": "multi", "RAG-DPID": "multi"
     }
     
-    ### NEW FEATURE ###
-    # Columns to permanently exclude from the dynamic filter list.
     FILTER_EXCLUSIONS = ['Key', 'Summary', 'Created', 'Updated', 'Resolved', 'Last viewed']
     
     DEFAULT_COLOR = '#808080'
@@ -317,7 +312,6 @@ class ChartGenerator:
 
         plot_df['Status'] = pd.Categorical(plot_df['Status'], categories=selected_statuses, ordered=True)
         
-        # Use the appropriate color map
         color_map = ColorManager.get_work_type_colors(is_color_blind_mode) if is_color_blind_mode else None
 
         fig = px.area(plot_df, x='Date', y='Count', color='Status',
@@ -427,7 +421,6 @@ class ChartGenerator:
             points='all'
         )
         
-        # Apply the new date formatting
         if interval == 'Monthly':
             fig.update_xaxes(tickformat="%b %Y")
         else:
@@ -724,10 +717,8 @@ class ChartGenerator:
         latest_start = wip_df['Start date'].max()
         latest_completion = wip_df['Completed date'].max()
         
-        # Determine the end date for the chart's x-axis
         plot_max_date = max(dt for dt in [latest_start, latest_completion] if pd.notna(dt))
 
-        # Ensure the date range doesn't go into the future unnecessarily
         today = pd.to_datetime(datetime.now().date())
         if plot_max_date > today:
             plot_max_date = today
@@ -1118,7 +1109,6 @@ class Dashboard:
         self.raw_df, self.processed_df, self.filtered_df = None, None, None
         self.status_mapping = {}
         self.selections = {}
-        ### NEW FEATURE ###
         self.filterable_columns = []
 
     def run(self):
@@ -1157,32 +1147,44 @@ class Dashboard:
 
         date_bounds_df = self._pre_process_for_sidebar()
         
-        ### NEW FEATURE ###
-        # Determine which columns are available for dynamic filtering
         self.filterable_columns = self._get_filterable_columns()
 
         self._display_sidebar(date_bounds_df)
+        
+        ### NEW FEATURE ###
+        # Display the new "Getting Started" guide
+        self._display_getting_started_guide()
 
         self._display_charts()
-
+        
     ### NEW FEATURE ###
+    def _display_getting_started_guide(self):
+        """Displays a new expander at the top of the app with key flow metric definitions."""
+        with st.expander("🚀 Getting Started with Flow Metrics", expanded=False):
+            st.markdown("""
+            This dashboard helps you visualize your team's workflow using four key metrics. Understanding them is the first step to improving your process.
+
+            - **Cycle Time:** The total time from when work **starts** on an item to when it is **completed**. It answers the question, "How long does it take to get things done?" A lower, more predictable cycle time is generally better.
+            
+            - **Work In Progress (WIP):** The number of items that have been started but are not yet finished. Limiting WIP is a key principle for improving flow, as too much WIP can lead to context switching, delays, and longer cycle times.
+            
+            - **Throughput:** The number of work items completed in a given time period (e.g., per week). It's a measure of your team's delivery rate.
+            
+            - **Work Item Age:** The time elapsed since an item was started. It's the "running clock" for items currently in progress. Watching the age of items helps you spot work that is getting stuck or taking longer than expected.
+            """)
+
     def _get_filterable_columns(self) -> List[str]:
         """Identifies columns in the dataframe that can be used for filtering."""
-        # Rule 3: Get status-related columns
         status_date_cols = list(self.status_mapping.values())
-        # Rule 4: Get the base names of status columns
         status_base_names = list(self.status_mapping.keys())
         
-        # Combine all columns that should be excluded
         exclusions = set(Config.FILTER_EXCLUSIONS + status_date_cols + status_base_names)
         
-        # Identify potential filterable columns (not in exclusion list)
         potential_filters = [
             col for col in self.raw_df.columns 
             if col not in exclusions and col not in ['Work type']
         ]
         
-        # Further filter out columns that are all empty/NA
         final_filters = [
             col for col in potential_filters 
             if self.raw_df[col].replace('', np.nan).notna().any()
@@ -1254,7 +1256,6 @@ class Dashboard:
         st.sidebar.markdown("#### 📋 Global Data Filters")
         st.sidebar.caption("ℹ️ *In the multi-select filters, choosing 'All' will deselect any other options. Likewise, choosing a specific option will deselect 'All'.*")
         
-        # --- Work Item Type Filter with interactive 'All' ---
         work_type_key = 'work_types'
         if work_type_key not in st.session_state:
             st.session_state[work_type_key] = ['All']
@@ -1269,7 +1270,6 @@ class Dashboard:
         )
         self.selections[work_type_key] = st.session_state[work_type_key]
         
-        # --- Date Range Filter ---
         self.selections["date_range"] = st.sidebar.selectbox("Date Range", Config.DATE_RANGES, index=0)
         self.selections["custom_start_date"], self.selections["custom_end_date"] = None, None
 
@@ -1296,8 +1296,6 @@ class Dashboard:
         self.selections["exclude_long_cycle_times"] = st.sidebar.checkbox("Exclude cycle time > 365 days", value=False)
         st.sidebar.caption("Note: Date Range does not apply to the Work Item Age chart.")
 
-        ### NEW FEATURE ###
-        # Dynamic filter selection
         st.sidebar.markdown("#### Dynamic Column Filters")
         if not self.filterable_columns:
             st.sidebar.info("No additional filterable columns found in your data file.")
@@ -1312,7 +1310,6 @@ class Dashboard:
                 help="Choose which columns from your file to use as filters. None are shown by default."
             )
             
-            # Create the actual filter widgets based on the user's selection
             for f_name in st.session_state.dynamic_filters_to_show:
                 filter_type = Config.FILTER_TYPE_HINTS.get(f_name, "multi") # Default to multi-select
                 unique_vals = self._get_unique_values(self.raw_df[f_name], filter_type)
@@ -1366,8 +1363,6 @@ class Dashboard:
         if "All" not in self.selections.get("work_types", ["All"]):
             df = df[df["Work type"].isin(self.selections["work_types"])]
         
-        ### NEW FEATURE ###
-        # Iterate over the dynamically created filters that the user has chosen to display
         if 'dynamic_filters_to_show' in st.session_state:
             for f_name in st.session_state.dynamic_filters_to_show:
                 filter_type = Config.FILTER_TYPE_HINTS.get(f_name, "multi")
@@ -1377,8 +1372,6 @@ class Dashboard:
                     if filter_type == "single" and selection != "All":
                         df = df[df[f_name] == selection]
                     elif filter_type == "multi" and "All" not in selection:
-                        # Ensure pattern matching works for items that might be substrings of others
-                        # e.g., filtering for "API" doesn't also catch "APIService" unless intended
                         pattern = '|'.join(r'\b' + re.escape(str(s)) + r'\b' for s in selection)
                         df = df[df[f_name].astype(str).str.contains(pattern, na=False, regex=True)]
 
@@ -1402,8 +1395,6 @@ class Dashboard:
 
         active_filters = [format_multiselect_display(self.selections['work_types'], 'Work types')]
         
-        ### NEW FEATURE ###
-        # Display active dynamic filters
         if 'dynamic_filters_to_show' in st.session_state:
             for f_name in st.session_state.dynamic_filters_to_show:
                 selection = self.selections.get(f_name)
@@ -1447,12 +1438,12 @@ class Dashboard:
         st.markdown('<div class="styled-expander">', unsafe_allow_html=True)
         with st.expander("Learn more about this chart", icon="🎓"):
              st.markdown("""
-                - **What it is:** This chart shows the cumulative number of work items in each stage of your workflow over time.
-                - **How to read it:** Each colored area represents a stage in your workflow. The vertical distance between the lines shows the number of items in that stage on a given day.
-                - **What patterns to look for:**
-                    - **Widening Bands:** If a colored band is getting wider over time, it indicates that more work is arriving in that stage than is leaving it. This is a classic sign of a bottleneck.
+                - **What it is:** This chart shows the cumulative number of work items in each stage of your workflow over time. It helps visualize the flow of work and identify bottlenecks.
+                - **How to read it:** Each colored band represents a stage in your workflow. The vertical distance between the lines shows the number of items in that stage on a given day (the Work In Progress for that stage). The horizontal distance represents the approximate cycle time for that stage.
+                - **What to look for:**
+                    - **Widening Bands:** If a colored band is getting wider over time, it indicates that more work is arriving in that stage than is leaving it. This is a classic sign of a **bottleneck**.
                     - **Flat Bands:** If all bands are flat, it means no work is being completed.
-                    - **Parallel Bands:** If the top and bottom lines of the chart are moving in parallel, it generally indicates a stable flow.
+                    - **Parallel Bands:** If the top and bottom lines of the chart are moving in parallel, it generally indicates a **stable flow** where work is arriving and leaving at a similar rate.
             """)
         st.markdown('</div>', unsafe_allow_html=True)
         with st.expander("Cumulative Flow Diagram (CFD) Controls", expanded=True):
@@ -1494,12 +1485,13 @@ class Dashboard:
         st.markdown('<div class="styled-expander">', unsafe_allow_html=True)
         with st.expander("Learn more about these charts", icon="🎓"):
             st.markdown("""
-                - **What it is:** These charts help visualize the consistency of your team's delivery over time.
-                - **How to read it:** Each dot is a completed work item. The vertical position of a dot shows its Cycle Time, and the horizontal position shows its completion date. Percentile lines show the percentage of work items that were completed in that time or less. For example, the 85th percentile line shows the point at which 85% of items were completed.
+                - **What it is:** These charts help visualize the consistency of your team's delivery over time. Cycle time is how long it takes to complete a work item from the moment work begins.
+                - **How to read it:** Each dot is a completed work item. The vertical position of a dot shows its Cycle Time, and the horizontal position shows its completion date. Percentile lines (also known as Service Level Expectations or SLEs) show the percentage of work items that were completed in that time or less. For example, the 85th percentile line shows the point at which 85% of items were completed.
                 - **What patterns to look for:**
-                    - **Clusters of dots** can indicate a change in your process or team that affected delivery speed.
-                    - **Gaps in the data** (where no dots appear) may suggest that work is being delivered in large batches rather than a smooth flow, often at the end of a release cycle.
-                    - **Outliers** (dots with very high Cycle Times) often represent items that were blocked by external dependencies or were too large to begin with.
+                    - **Predictability:** A tight, dense cluster of dots indicates a more predictable and stable process. Widely scattered dots suggest an unpredictable process with high variability.
+                    - **Clusters of dots:** A group of dots forming a distinct cluster can indicate a change in your process or team that affected delivery speed.
+                    - **Gaps in the data:** Large horizontal gaps where no dots appear may suggest that work is being delivered in large batches rather than a smooth flow, often at the end of a release cycle.
+                    - **Outliers:** Dots with very high Cycle Times often represent items that were blocked by external dependencies, were too large to begin with, or were stuck in a queue for a long time.
                 """)
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1592,8 +1584,18 @@ class Dashboard:
     def _display_story_point_chart(self):
         """Displays the Story Point Correlation chart and its controls."""
         st.header("Story Point Analysis")
-
-        st.markdown("This chart plots the cycle time of completed items against their story point estimates.")
+        ### NEW FEATURE ###
+        st.markdown('<div class="styled-expander">', unsafe_allow_html=True)
+        with st.expander("Learn more about this chart", icon="🎓"):
+            st.markdown("""
+                - **What it is:** This chart plots the cycle time of completed items against their story point estimates. It's a tool to check the correlation between estimates and actual time taken.
+                - **How to read it:** Each dot is a work item. The horizontal position is its story point value, and the vertical position is its cycle time.
+                - **What to look for:**
+                    - **No Correlation (Ideal for Flow):** If there is little to no relationship between story points and cycle time (dots are scattered randomly across different point values), it can indicate that your team is effectively "right-sizing" work. This means you are breaking down work into small, similarly-sized pieces, regardless of the initial estimate. In a mature flow-based system, this is often a desirable outcome.
+                    - **Positive Correlation:** If cycle time tends to increase as story points increase, it means your estimates are somewhat predictive of effort. However, a wide vertical spread for any given story point value still indicates high variability.
+                    - **High Variability within a Story Point:** If a single story point value (e.g., 5 points) has a very wide range of cycle times (from 5 to 50 days), it highlights that story points are not a reliable predictor of completion time for your team.
+            """)
+        st.markdown('</div>', unsafe_allow_html=True)
 
         status_options = ["None"] + list(self.status_mapping.keys())
         col1, col2 = st.columns(2)
@@ -1630,10 +1632,10 @@ class Dashboard:
         st.markdown('<div class="styled-expander">', unsafe_allow_html=True)
         with st.expander("Learn more about this chart", icon="🎓"):
             st.markdown("""
-            - **What it is:** This chart shows all the items that are currently in progress, their current status (column), and how long they have been in progress (their Age).
+            - **What it is:** This chart shows all the items that are currently in progress, their current status (column), and how long they have been in progress (their Age). Age is the "running clock" for items that have not yet finished.
             - **How to read it:** Each dot is a work item that has started but not yet finished. Its vertical position shows its current age in days.
             - **What to look for:**
-                - **The oldest items first.** The most important question in a Daily Stand-up is "what's the oldest thing we are working on, and what are we doing to get it moving?"
+                - **The oldest items first.** The most important question in a Daily Stand-up is "what's the oldest thing we are working on, and what are we doing to get it moving?" Items at the top of the chart are your oldest and represent the most risk.
                 - **Items nearing or crossing percentile lines.** The percentile lines are taken from your historical Cycle Time data. If an item's age is approaching the 85th percentile, it is at high risk of taking longer than 85% of all your previous items. This is a crucial signal to the team to intervene by swarming on the item or breaking it down.
             """)
         st.markdown('</div>', unsafe_allow_html=True)
@@ -1723,7 +1725,18 @@ class Dashboard:
     def _display_wip_chart(self):
         """Displays the WIP chart."""
         st.header("Work In Progress (WIP) Trend")
-
+        ### NEW FEATURE ###
+        st.markdown('<div class="styled-expander">', unsafe_allow_html=True)
+        with st.expander("Learn more about this chart", icon="🎓"):
+            st.markdown("""
+            - **What it is:** This chart shows the number of work items that are in progress at any given point in time.
+            - **How to read it:** The line shows the total count of in-progress items for each day in the selected period.
+            - **What to look for:**
+                - **Rising WIP:** A consistent upward trend in WIP is a warning sign. According to Little's Law, if your throughput remains constant, a rising WIP will directly lead to longer cycle times.
+                - **Large Spikes and Drops:** Significant fluctuations in WIP can indicate that work is being started in large batches, which can strain the system. Aim for a stable, limited WIP.
+                - **Relationship to Cycle Time:** Compare the WIP chart with your Cycle Time scatterplot. Periods of high WIP will often correspond to periods of longer cycle times.
+            """)
+        st.markdown('</div>', unsafe_allow_html=True)
         status_options = ["None"] + list(self.status_mapping.keys())
         col1, col2 = st.columns(2)
 
@@ -1754,11 +1767,12 @@ class Dashboard:
         st.markdown('<div class="styled-expander">', unsafe_allow_html=True)
         with st.expander("Learn more about this chart", icon="🎓"):
             st.markdown("""
-            - **What it is:** This chart shows the number of work items completed per unit of time (day, week, or fortnight).
+            - **What it is:** This chart shows the number of work items completed per unit of time (e.g., week, fortnight). Throughput is a measure of the team's delivery rate.
             - **How to read it:** Each bar represents a time period, and its height shows the number of items that were completed in that period.
             - **What to look for:**
                 - **Consistency:** A relatively consistent throughput over time indicates a stable and predictable process.
                 - **Variability:** High variability (large spikes and drops) can suggest that work items are not "right-sized" or that the team is being affected by outside interruptions or dependencies.
+                - **Zero Throughput:** Any period with zero throughput is worth investigating. It may indicate that the team was blocked or focused on other activities.
             """)
         st.markdown('</div>', unsafe_allow_html=True)
         st.markdown("Throughput measures the number of work items completed per unit of time. Use the control below to change the time unit.")
@@ -1827,12 +1841,12 @@ class Dashboard:
         """Displays the Forecasting charts and controls."""
         st.header("Throughput Forecasting")
         st.markdown('<div class="styled-expander">', unsafe_allow_html=True)
-        with st.expander("Learn more about this chart", icon="🎓"):
+        with st.expander("Learn more about forecasting", icon="🎓"):
             st.markdown("""
-            - **What it is:** These charts use a Monte Carlo simulation to forecast future outcomes based on your team's historical throughput data.
-            - **How to read it:** The charts run thousands of simulations of your future work to generate a range of possible outcomes and the probability of achieving them. For example, a result might say "There is an 85% chance of completing 12 or more items in the next two weeks."
-            - **Why use Monte Carlo?** Traditional forecasting uses simple averages, which can be misleading and hide risk (this is known as the "Flaw of Averages"). A Monte Carlo simulation is a more robust statistical method that accounts for the variability in your past performance. By running thousands of simulations, it provides a much more realistic and trustworthy range of future outcomes and the probabilities associated with them.
-            - **A Note on "Right-Sizing":** Forecasts are most reliable when the work items are "right-sized." Based on the guidance from industry experts, this means each item should be broken down into the smallest possible chunk that still delivers value and can be completed within your team's Service Level Expectation (SLE).
+            - **What it is:** These charts use a **Monte Carlo simulation** to forecast future outcomes based on your team's historical throughput data. Instead of giving a single, misleading date, it provides a range of outcomes and their probabilities.
+            - **How to read it:** The charts run thousands of simulations of your future work to generate a range of possible outcomes. For example, a result might say "There is an 85% chance of completing 12 or more items in the next two weeks." This is a probabilistic forecast, not a deterministic one.
+            - **Why use Monte Carlo?** Traditional forecasting often uses simple averages, which can be misleading and hide risk (this is known as the "Flaw of Averages"). A Monte Carlo simulation is a more robust statistical method that accounts for the variability in your past performance. By running thousands of simulations, it provides a much more realistic and trustworthy range of future outcomes.
+            - **A Note on "Right-Sizing":** Forecasts are most reliable when the work items are "right-sized." This means each item should be broken down into the smallest possible chunk that still delivers value and can be completed within your team's Service Level Expectation (SLE).
             """)
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1850,7 +1864,6 @@ class Dashboard:
         forecast_source_df = self._apply_all_filters(self.raw_df, apply_date_filter=False)
         throughput_status_col = self.selections.get('throughput_status_col')
         
-        # --- Stability Check ---
         weekly_throughput, _ = ChartGenerator._get_recent_weekly_throughput(forecast_source_df, throughput_status_col)
         
         with st.expander("Data Stability Check"):
@@ -2020,7 +2033,6 @@ def display_welcome_message():
     def _create_inline_link_with_logo(text: str, logo_path: str, url: str) -> str:
         """Creates a markdown-compatible HTML string for a link with an inline logo."""
         try:
-            # Check if the logo file exists before trying to open it
             if not os.path.exists(logo_path):
                 return f'<a href="{url}" target="_blank">**{text}**</a>'
             
