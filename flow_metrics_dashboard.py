@@ -201,7 +201,6 @@ class DataProcessor:
         df_eff['Flow Efficiency'] = df_eff['Flow Efficiency'].clip(0, 100)
         return df.merge(df_eff[['Key', 'Active Time Days', 'Flow Efficiency']], on='Key', how='left').fillna({'Flow Efficiency': 0, 'Active Time Days': 0})
 
-# ... (All ChartGenerator methods are unchanged from the previous complete version) ...
 class ChartGenerator:
     """Generates Plotly charts for the dashboard."""
     @staticmethod
@@ -639,11 +638,12 @@ class Dashboard:
     def _display_getting_started_guide(self):
         st.markdown('<div class="guidance-expander">', unsafe_allow_html=True)
         with st.expander("🚀 Getting Started with Flow Metrics", expanded=False):
-            st.markdown("""This dashboard helps you visualize your team's workflow using four key metrics.
-            - **Cycle Time:** The total time from when work **starts** on an item to when it is **completed**.
-            - **Work In Progress (WIP):** The number of items that have been started but are not yet finished.
-            - **Throughput:** The number of work items completed in a given time period.
-            - **Work Item Age:** The time elapsed since an item was started.""")
+            st.markdown("""This dashboard helps you visualize your team's workflow using four key flow metrics, along with other chart views and statistical forecasting. The primary metrics are:
+
+- **Cycle Time**: The total time from when work starts on an item to when it is completed.
+- **Work Item Age**: The time that has passed since an item was started.
+- **Work In Progress (WIP)**: The number of items that have been started but are not yet finished.
+- **Throughput**: The number of work items completed in a given time period.""")
         st.markdown('</div>', unsafe_allow_html=True)
 
     def _get_filterable_columns(self) -> List[str]:
@@ -802,7 +802,6 @@ class Dashboard:
         if chart: st.plotly_chart(chart, use_container_width=True)
         else: st.warning("⚠️ Could not calculate Flow Efficiency. Check selections and ensure there are completed items.")
 
-    # ... (all other display methods like _display_cycle_time_charts, _display_cfd_chart etc. are here)
     def _display_cfd_chart(self):
         """Displays the Cumulative Flow Diagram and its controls."""
         st.header("Process Stability & Flow")
@@ -1171,6 +1170,18 @@ class Dashboard:
                 cols = st.columns(len(stats))
                 for i, (p, date_val) in enumerate(stats.items()):
                     with cols[i]: st.markdown(f"""<div class="forecast-box" style="background-color: {box_colors.get(p, '#e9ecef')}; color: {text_color};"><div class="forecast-label">{p}% Likelihood</div><div class="forecast-value">{date_val.strftime("%d %b, %Y")}</div></div>""", unsafe_allow_html=True)
+
+            with st.expander("🤔 What does it mean if the percentile dates are the same?"):
+                st.markdown("""
+                This is not an error. It's a positive sign that your forecast is **reliable** because it's based on very consistent historical performance.
+
+                The forecast is calculated by simulating thousands of future scenarios based on your past weekly completion rates (throughput). If your throughput is very stable, the vast majority of simulations will finish in the **exact same number of weeks**.
+
+                When more than 85% of the simulations give the same result (e.g., "3 weeks"), the 50th, 70th, and 85th percentiles will all naturally calculate to the same final date.
+
+                **In short: the closer the dates are, the more predictable your process is, and the more confidence you can have in the forecast.**
+                """)
+
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("⚠️ Insufficient historical data for forecasting.")
             with st.expander("🔍 Explore Forecast Scenarios"):
