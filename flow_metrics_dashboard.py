@@ -687,14 +687,14 @@ class Dashboard:
         if work_type_key not in st.session_state: st.session_state[work_type_key] = ['All']
         st.sidebar.multiselect("Work Item Type", ["All"] + ChartGenerator._order_work_types(self.raw_df), key=work_type_key, on_change=self._handle_multiselect, args=(work_type_key,))
         self.selections[work_type_key] = st.session_state[work_type_key]
-        self.selections["date_range"] = st.sidebar.selectbox("Date Range", Config.DATE_RANGES, index=0)
+        self.selections["date_range"] = st.sidebar.selectbox("Date Range", Config.DATE_RANGES, index=0, help="The selected date range does not apply to the Work Item Age chart.")
         self.selections["custom_start_date"], self.selections["custom_end_date"] = None, None
         if self.selections["date_range"] == "Custom":
             min_val, max_val = (date_bounds_df.iloc[0]['Start date'], date_bounds_df.iloc[0]['Completed date'])
             self.selections["custom_start_date"] = st.sidebar.date_input("Start date", value=min_val if pd.notna(min_val) else datetime.now().date(), min_value=min_val, max_value=max_val)
             self.selections["custom_end_date"] = st.sidebar.date_input("End date", value=max_val if pd.notna(max_val) else datetime.now().date(), min_value=min_val, max_value=max_val)
         self.selections["exclude_long_cycle_times"] = st.sidebar.checkbox("Exclude cycle time > 365 days", value=False)
-        st.sidebar.caption("Note: Date Range does not apply to Work Item Age.")
+        self.selections['color_blind_mode'] = st.sidebar.checkbox("Enable Color-Blind Friendly Mode")
         st.sidebar.markdown("#### Dynamic Column Filters")
         if not self.filterable_columns:
             st.sidebar.info("No additional filterable columns found.")
@@ -713,8 +713,6 @@ class Dashboard:
                     self.selections[f_name] = st.session_state[session_key]
 
     def _sidebar_chart_controls(self):
-        st.sidebar.markdown("### Accessibility")
-        self.selections['color_blind_mode'] = st.sidebar.checkbox("Enable Color-Blind Friendly Mode")
         with st.sidebar.expander("📈 Cycle Time & Age Percentiles"):
             show_percentiles = st.checkbox("Show Percentile Lines", value=True)
             self.selections["percentiles"] = {f"show_{p}th": show_percentiles for p in Config.PERCENTILES}
