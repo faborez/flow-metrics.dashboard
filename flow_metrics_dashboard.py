@@ -836,19 +836,13 @@ class Dashboard:
         """Displays the Cycle Time charts and statistics."""
         st.header("Cycle Time Analysis")
         st.markdown('<div class="guidance-expander">', unsafe_allow_html=True)
-        with st.expander("Learn more about these charts", icon="🎓"):
+        with st.expander("Learn more about Cycle Time", icon="🎓"):
             st.markdown("""
-                - **What it is:** These charts help visualize the consistency of your team's delivery over time. Cycle time is how long it takes to complete a work item from the moment work begins.
-                - **How to read it:** Each dot is a completed work item. The vertical position of a dot shows its Cycle Time, and the horizontal position shows its completion date. Percentile lines (also known as Service Level Expectations or SLEs) show the percentage of work items that were completed in that time or less. For example, the 85th percentile line shows the point at which 85% of items were completed.
-                - **What patterns to look for:**
-                    - **Predictability:** A tight, dense cluster of dots indicates a more predictable and stable process. Widely scattered dots suggest an unpredictable process with high variability.
-                    - **Clusters of dots:** A group of dots forming a distinct cluster can indicate a change in your process or team that affected delivery speed.
-                    - **Gaps in the data:** Large horizontal gaps where no dots appear may suggest that work is being delivered in large batches rather than a smooth flow, often at the end of a release cycle.
-                    - **Outliers:** Dots with very high Cycle Times often represent items that were blocked by external dependencies, were too large to begin with, or were stuck in a queue for a long time.
-                """)
+            - **What it is:** Cycle time is how long it takes to complete a work item from the moment work begins until it is delivered. These charts help you visualize the consistency and predictability of your team's delivery over time.
+            - **Why it matters:** A stable and predictable cycle time allows for more reliable forecasting. Consistently high or increasing cycle times can indicate systemic problems like bottlenecks, work items being too large, or external dependencies.
+            """)
         st.markdown('</div>', unsafe_allow_html=True)
         
-        st.divider()
         status_options = ["None"] + list(self.status_mapping.keys())
         col1, col2 = st.columns(2)
 
@@ -884,25 +878,44 @@ class Dashboard:
             self.filtered_df = pd.DataFrame() 
             return
         
-        st.divider()
         m1, m2, m3 = st.columns(3)
         m1.metric("📊 Total Items in Filter", summary_stats['total'])
         m2.metric("✅ Completed Items", summary_stats['completed'])
         m3.metric("🔄 Still In Progress", summary_stats['in_progress'])
-        st.divider()
 
         ct_tabs = st.tabs(["Scatter Plot", "Bubble Chart", "Box Plot", "Distribution (Histogram)", "Time in Status"])
         with ct_tabs[0]:
+            with st.expander("How to Read This Chart", icon="🎓"):
+                st.markdown("""
+                - **How to read it:** Each dot is a completed work item. The vertical position of a dot shows its Cycle Time, and the horizontal position shows its completion date. Percentile lines (also known as Service Level Expectations or SLEs) show the percentage of work items that were completed in that time or less. For example, the 85th percentile line shows the point at which 85% of items were completed.
+                - **What patterns to look for:**
+                    - **Predictability:** A tight, dense cluster of dots indicates a more predictable and stable process. Widely scattered dots suggest an unpredictable process with high variability.
+                    - **Clusters of dots:** A group of dots forming a distinct cluster can indicate a change in your process or team that affected delivery speed.
+                    - **Gaps in the data:** Large horizontal gaps where no dots appear may suggest that work is being delivered in large batches rather than a smooth flow, often at the end of a release cycle.
+                    - **Outliers:** Dots with very high Cycle Times often represent items that were blocked by external dependencies, were too large to begin with, or were stuck in a queue for a long time.
+                """)
             st.markdown("ℹ️ *A small amount of random vertical 'jitter' has been added to separate overlapping points.*")
             chart = ChartGenerator.create_cycle_time_chart(self.filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("No completed items in the selected date range could be found to display on this chart.")
         with ct_tabs[1]:
+            with st.expander("How to Read This Chart", icon="🎓"):
+                st.markdown("""
+                - **How to Read It:** Each bubble's position shows the cycle time and completion date, but its **size** indicates the *number of items* finished at that exact point. A larger bubble means more items were completed in a batch.
+                - **Patterns to Look For:** A healthy flow is often represented by a stream of **small, frequent bubbles**.
+                - **Anti-Patterns:** Watch out for very **large, infrequent bubbles**. This can indicate that work is being delivered in big batches (e.g., at the end of a sprint) rather than flowing smoothly.
+                """)
             st.markdown("ℹ️ *Bubbles represent one or more items completed on the same day with the same cycle time.*")
             chart = ChartGenerator.create_cycle_time_bubble_chart(self.filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("No completed items in the selected date range could be found to display on this chart.")
         with ct_tabs[2]:
+            with st.expander("How to Read This Chart", icon="🎓"):
+                st.markdown("""
+                - **How to Read It:** This statistical chart summarizes your cycle time for each period. The **box** shows the range where the middle 50% of your work was completed. The **line inside the box** is the median (50th percentile). The dots are individual work items, often highlighting outliers.
+                - **Patterns to Look For:** A stable, predictable process is indicated by boxes that are **short and at a consistent height** over time. This means your cycle time is not varying wildly.
+                - **Anti-Patterns:** Watch out for boxes that get **taller over time** (increasing variability and unpredictability) or a median line that is **consistently trending upwards** (a clear warning that your average cycle time is getting longer).
+                """)
             self.selections["box_plot_interval"] = st.selectbox("Group Box Plot by", ["Weekly", "Monthly"], index=0)
             chart = ChartGenerator.create_cycle_time_box_plot(self.filtered_df, self.selections["box_plot_interval"], self.selections["percentiles"], self.selections['color_blind_mode'])
             if chart: st.plotly_chart(chart, use_container_width=True)
