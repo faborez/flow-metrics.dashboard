@@ -721,10 +721,6 @@ class Dashboard:
             if show_percentiles:
                 c1, c2 = st.columns(2)
                 for p, col in zip(Config.PERCENTILES, [c1, c2, c1, c2]): self.selections["percentiles"][f"show_{p}th"] = col.checkbox(f"{p}th", value=True, key=f"{p}th_visible")
-        with st.sidebar.expander("⏱️ Flow Efficiency Controls"):
-            all_statuses = list(self.status_mapping.keys())
-            default_active = [s for s in all_statuses if s.lower() in ['development', 'in review', 'in progress']]
-            self.selections['active_statuses'] = st.multiselect("Select Active Work Statuses", all_statuses, default=default_active, help="Select statuses that represent 'active' work, not waiting.")
 
     def _get_unique_values(self, series: pd.Series, filter_type: str) -> List[str]:
         if series.dropna().empty: return []
@@ -745,22 +741,6 @@ class Dashboard:
         if apply_date_filter and 'Completed date' in df.columns: df = _apply_date_filter(df, 'Completed date', self.selections["date_range"], self.selections["custom_start_date"], self.selections["custom_end_date"])
         return df
 
-    def _display_header_and_metrics(self, stats: Dict):
-        st.info(f"📊 **Cycle Time Configuration:** Starting: **{self.selections['start_status']}** | Done: **{self.selections['completed_status']}**")
-        with st.expander("Cycle Time Data Summary"):
-            c1, c2, c3 = st.columns(3)
-            c1.metric("📊 Total Items in Filter", stats['total']); c2.metric("✅ Completed Items", stats['completed']); c3.metric("🔄 Still In Progress", stats['in_progress'])
-        st.info("ℹ️ **Cycle Time Formula:** (Done Date - Starting Date) + 1 days")
-        active_filters = [format_multiselect_display(self.selections['work_types'], 'Work types')]
-        if 'dynamic_filters_to_show' in st.session_state:
-            for f_name in st.session_state.dynamic_filters_to_show:
-                selection = self.selections.get(f_name)
-                if isinstance(selection, list) and "All" not in selection and selection: active_filters.append(f"{f_name}: {format_multiselect_display(selection, '')}")
-                elif isinstance(selection, str) and selection != "All": active_filters.append(f"{f_name}: {selection}")
-        date_range_display = f"from {self.selections['custom_start_date'].strftime('%Y-%m-%d')} to {self.selections['custom_end_date'].strftime('%Y-%m-%d')}" if self.selections['date_range'] == "Custom" and self.selections.get('custom_start_date') else self.selections['date_range']
-        active_filters.append(date_range_display)
-        st.markdown(f"**🎯 Showing:** {' | '.join(filter(None, active_filters))}")
-
     def _display_charts(self):
         tab_list = ["📈 Cycle Time", "🔄 Process Flow", "📊 Work Item Age", "⏱️ Flow Efficiency", "🔄 WIP Trend", "📊 Throughput", "🔮 Throughput Forecast"]
         sp_col_name = next((col for col in ['Story Points', 'Story point estimate'] if col in self.raw_df.columns and pd.to_numeric(self.raw_df[col], errors='coerce').notna().any()), None)
@@ -780,27 +760,38 @@ class Dashboard:
                 - **Formula:** `Flow Efficiency = (Total Active Time / Total Cycle Time) * 100`
             """)
         st.markdown('</div>', unsafe_allow_html=True)
-        if self.filtered_df is None or self.filtered_df.empty:
-            st.info("Please configure cycle time on the 'Cycle Time' tab to view this chart.")
+        
+        if self.filtered_df is None or self.filtered_df.empty or 'start_status' not in self.selections:
+            st.info("To view this chart, first configure your cycle time statuses on the '📈 Cycle Time' tab.")
             return
-        active_statuses = self.selections.get('active_statuses', [])
+
         start_status, end_status = self.selections.get('start_status'), self.selections.get('completed_status')
-        st.info(f"**Calculation based on:**\n- **Cycle Time from:** `{start_status}` to `{end_status}` (set on the Cycle Time tab).\n- **Active Statuses:** `{', '.join(active_statuses)}` (set in the sidebar).")
+        st.info(f"**Calculation based on:**\n- **Cycle Time from:** `{start_status}` to `{end_status}` (set on the Cycle Time tab).\n- **Active Statuses:** Please select the statuses below that represent 'active' work, not waiting.")
+
+        all_statuses = list(self.status_mapping.keys())
+        default_active = [s for s in all_statuses if s.lower() in ['development', 'in review', 'in progress']]
+        active_statuses = st.multiselect("Select Active Work Statuses", all_statuses, default=default_active, help="Select statuses that represent 'active' work, not waiting.")
+        
         if not active_statuses:
-            st.warning("Please select one or more 'Active' statuses in the sidebar under 'Chart-Specific Controls' to calculate Flow Efficiency.")
+            st.warning("Please select one or more 'Active' statuses to calculate Flow Efficiency.")
             return
+
         efficiency_df = DataProcessor.calculate_flow_efficiency(self.filtered_df, active_statuses, list(self.status_mapping.values()))
         avg_active_time = efficiency_df['Active Time Days'].mean()
         avg_cycle_time = efficiency_df['Cycle time'].mean()
         avg_efficiency = efficiency_df['Flow Efficiency'].mean()
+
         c1, c2, c3 = st.columns(3)
         c1.metric("Average Active Time", f"{avg_active_time:.2f} Days", help="The average time items spent in 'active' statuses.")
         c2.metric("Average Cycle Time", f"{avg_cycle_time:.2f} Days", help="The average total time from the selected start to end status.")
         c3.metric("Average Flow Efficiency", f"{avg_efficiency:.1f}%", help="The average percentage of cycle time that was spent in 'active' statuses.")
         st.divider()
+        
         chart = ChartGenerator.create_flow_efficiency_histogram(efficiency_df)
-        if chart: st.plotly_chart(chart, use_container_width=True)
-        else: st.warning("⚠️ Could not calculate Flow Efficiency. Check selections and ensure there are completed items.")
+        if chart: 
+            st.plotly_chart(chart, use_container_width=True)
+        else: 
+            st.warning("⚠️ Could not calculate Flow Efficiency. Check selections and ensure there are completed items.")
 
     def _display_cfd_chart(self):
         """Displays the Cumulative Flow Diagram and its controls."""
@@ -816,18 +807,15 @@ class Dashboard:
                     - **Parallel Bands:** If the top and bottom lines of the chart are moving in parallel, it generally indicates a **stable flow** where work is arriving and leaving at a similar rate.
             """)
         st.markdown('</div>', unsafe_allow_html=True)
-        with st.expander("Cumulative Flow Diagram (CFD) Controls", expanded=True):
-
-            all_statuses = list(self.status_mapping.keys())
-
-            self.selections['cfd_statuses'] = st.multiselect(
-                "Select workflow statuses in order",
-                options=all_statuses,
-                default=all_statuses,
-                help="Select the statuses you want to appear in the chart. The order of selection determines the stacking order."
-            )
 
         st.divider()
+        all_statuses = list(self.status_mapping.keys())
+        self.selections['cfd_statuses'] = st.multiselect(
+            "Select workflow statuses in order",
+            options=all_statuses,
+            default=all_statuses,
+            help="Select the statuses you want to appear in the chart. The order of selection determines the stacking order."
+        )
 
         if not self.selections['cfd_statuses']:
             st.info("ℹ️ Please select at least one status to generate the Cumulative Flow Diagram.")
@@ -864,26 +852,22 @@ class Dashboard:
                     - **Outliers:** Dots with very high Cycle Times often represent items that were blocked by external dependencies, were too large to begin with, or were stuck in a queue for a long time.
                 """)
         st.markdown('</div>', unsafe_allow_html=True)
-
+        
+        st.divider()
         status_options = ["None"] + list(self.status_mapping.keys())
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
 
         with col1:
-            self.selections["start_status"] = st.selectbox("Starting Status", status_options, key="cycle_time_start")
+            self.selections["start_status"] = st.selectbox("Define your 'Start' status for Cycle Time calculation", status_options, key="cycle_time_start")
         with col2:
-            self.selections["completed_status"] = st.selectbox("Done Status", status_options, key="cycle_time_end")
-
-        with col3:
-            self.selections["box_plot_interval"] = st.selectbox("Box Plot Grouping", ["Weekly", "Monthly"], index=0)
+            self.selections["completed_status"] = st.selectbox("Define your 'Done' status for Cycle Time calculation", status_options, key="cycle_time_end")
 
         self.selections["start_col"] = self.status_mapping.get(self.selections["start_status"])
         self.selections["completed_col"] = self.status_mapping.get(self.selections["completed_status"])
 
-        st.divider()
-
         if not self.selections["start_col"] or not self.selections["completed_col"]:
             st.info("To see your charts, please choose a 'Starting Status' and a 'Done Status' from the dropdowns above.")
-            self.filtered_df = pd.DataFrame()
+            self.filtered_df = pd.DataFrame() 
             return
 
         is_valid, error_msg = StatusManager.validate_status_order(self.raw_df, self.selections["start_col"], self.selections["completed_col"])
@@ -904,50 +888,47 @@ class Dashboard:
             st.warning("No completed items found for the selected criteria. Unable to display Cycle Time charts.")
             self.filtered_df = pd.DataFrame() 
             return
-
-        self._display_header_and_metrics(summary_stats)
+        
+        st.divider()
+        m1, m2, m3 = st.columns(3)
+        m1.metric("📊 Total Items in Filter", summary_stats['total'])
+        m2.metric("✅ Completed Items", summary_stats['completed'])
+        m3.metric("🔄 Still In Progress", summary_stats['in_progress'])
+        st.divider()
 
         ct_tabs = st.tabs(["Scatter Plot", "Bubble Chart", "Box Plot", "Distribution (Histogram)", "Time in Status"])
         with ct_tabs[0]:
-            st.subheader("Scatter Plot")
             st.markdown("ℹ️ *A small amount of random vertical 'jitter' has been added to separate overlapping points.*")
             chart = ChartGenerator.create_cycle_time_chart(self.filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("No completed items in the selected date range could be found to display on this chart.")
         with ct_tabs[1]:
-            st.subheader("Aggregated Bubble Chart")
             st.markdown("ℹ️ *Bubbles represent one or more items completed on the same day with the same cycle time.*")
             chart = ChartGenerator.create_cycle_time_bubble_chart(self.filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("No completed items in the selected date range could be found to display on this chart.")
         with ct_tabs[2]:
-            st.subheader("Cycle Time Distribution Over Time")
+            self.selections["box_plot_interval"] = st.selectbox("Group Box Plot by", ["Weekly", "Monthly"], index=0)
             chart = ChartGenerator.create_cycle_time_box_plot(self.filtered_df, self.selections["box_plot_interval"], self.selections["percentiles"], self.selections['color_blind_mode'])
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("No completed items in the selected date range could be found to display on this chart.")
         with ct_tabs[3]:
-            st.subheader("Distribution (Histogram)")
             chart = ChartGenerator.create_cycle_time_histogram(self.filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("No completed items in the selected date range could be found to display on this chart.")
         with ct_tabs[4]:
-            st.subheader("Time in Status")
             st.markdown("This chart shows the average time items spend in each status column of your raw data export.")
             status_cols = list(self.status_mapping.values())
             chart, chart_data = ChartGenerator.create_time_in_status_chart(self.filtered_df, status_cols)
             if chart:
                 st.plotly_chart(chart, use_container_width=True)
-
                 if chart_data is not None and not chart_data.empty:
                     st.divider()
                     num_statuses = len(chart_data)
                     cols = st.columns(min(num_statuses, 5), gap="small")
                     for i, row in chart_data.iterrows():
                         col = cols[i % 5]
-                        col.metric(
-                            label=row['Status'],
-                            value=f"{int(row['Average Time (Days)'])} days"
-                        )
+                        col.metric(label=row['Status'], value=f"{int(row['Average Time (Days)'])} days")
             else:
                 st.warning("Not enough data was found for the selected statuses to calculate the average time spent in each.")
 
@@ -966,6 +947,7 @@ class Dashboard:
             """)
         st.markdown('</div>', unsafe_allow_html=True)
 
+        st.divider()
         status_options = ["None"] + list(self.status_mapping.keys())
         col1, col2 = st.columns(2)
 
@@ -976,8 +958,6 @@ class Dashboard:
 
         self.selections["sp_start_col"] = self.status_mapping.get(self.selections["sp_start_status"])
         self.selections["sp_end_col"] = self.status_mapping.get(self.selections["sp_end_status"])
-
-        st.divider()
 
         if not self.selections["sp_start_col"] or not self.selections["sp_end_col"]:
             st.info("ℹ️ Please select a 'Starting Status' and 'Done Status' above to generate the chart.")
@@ -1007,34 +987,26 @@ class Dashboard:
                 - **Items nearing or crossing percentile lines.** The percentile lines are taken from your historical Cycle Time data. If an item's age is approaching the 85th percentile, it is at high risk of taking longer than 85% of all your previous items. This is a crucial signal to the team to intervene by swarming on the item or breaking it down.
             """)
         st.markdown('</div>', unsafe_allow_html=True)
-        st.info("""
-        - WIP counts at the top show all in-progress items currently in that status.
-        - Dots on the chart represent only those items that have passed through the selected 'Start Status for Age Calculation'.
-        - The percentile lines are based on the cycle time of completed items (from the "Cycle Time" tab) to help you gauge if aging items are approaching your typical completion times.
-        - A table will appear below the chart listing any items that are included in WIP but are not plotted as a dot.
-        """)
-
+        
+        st.divider()
         status_options = ["None"] + list(self.status_mapping.keys())
         sensible_done_options = [s for s in status_options if s.lower() == 'done']
         default_done_index = status_options.index(sensible_done_options[0]) if sensible_done_options else len(status_options) - 1
 
-        with st.expander("Work Item Age Chart Controls", expanded=True):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                self.selections["age_start_status"] = st.selectbox("Start Status for Age Calculation", status_options, key="age_start", index=1 if len(status_options) > 1 else 0, help="Defines the start of the X-axis and the point from which item age is calculated.")
-            with col2:
-                try: default_end_index = status_options.index("In Testing")
-                except ValueError: default_end_index = len(status_options) - 2 if len(status_options) > 2 else 0
-                self.selections["age_end_status"] = st.selectbox("End Status for Axis", status_options, key="age_end", index=default_end_index, help="Defines the end of the X-axis.")
-            with col3:
-                self.selections["age_true_final_status"] = st.selectbox("Select the true 'Done' status", status_options, key="age_final", index=default_done_index, help="Select the status that marks an item as completely finished for your workflow.")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            self.selections["age_start_status"] = st.selectbox("Start Status for Age Calculation", status_options, key="age_start", index=1 if len(status_options) > 1 else 0, help="Defines the start of the X-axis and the point from which item age is calculated.")
+        with col2:
+            try: default_end_index = status_options.index("In Testing")
+            except ValueError: default_end_index = len(status_options) - 2 if len(status_options) > 2 else 0
+            self.selections["age_end_status"] = st.selectbox("End Status for Axis", status_options, key="age_end", index=default_end_index, help="Defines the end of the X-axis.")
+        with col3:
+            self.selections["age_true_final_status"] = st.selectbox("Select the true 'Done' status", status_options, key="age_final", index=default_done_index, help="Select the status that marks an item as completely finished for your workflow.")
 
         self.selections["age_start_col"] = self.status_mapping.get(self.selections["age_start_status"])
         self.selections["age_end_col"] = self.status_mapping.get(self.selections["age_end_status"])
         self.selections["age_true_final_col"] = self.status_mapping.get(self.selections["age_true_final_status"])
         
-        st.divider()
-
         if not all([self.selections["age_start_col"], self.selections["age_end_col"], self.selections["age_true_final_col"]]):
             st.info("To see the chart, please select a 'Start Status for Age Calculation', an 'End Status for Axis', and a true 'Done' status from the controls above.")
             return
@@ -1058,8 +1030,15 @@ class Dashboard:
         cycle_stats = StatsCalculator.cycle_time_stats(self.filtered_df) if self.filtered_df is not None and not self.filtered_df.empty else None
 
         chart = ChartGenerator.create_work_item_age_chart(df_for_plotting, df_for_wip_calc, status_order, cycle_stats or {}, self.selections["percentiles"], self.selections['color_blind_mode'])
-        if chart: st.plotly_chart(chart, use_container_width=True)
-        else: st.warning("No work items currently in progress were found based on your status selections.")
+        if chart: 
+            st.info("""
+            - WIP counts at the top show all in-progress items currently in that status.
+            - Dots on the chart represent only those items that have passed through the selected 'Start Status for Age Calculation'.
+            - The percentile lines are based on the cycle time of completed items (from the "Cycle Time" tab) to help you gauge if aging items are approaching your typical completion times.
+            """)
+            st.plotly_chart(chart, use_container_width=True)
+        else: 
+            st.warning("No work items currently in progress were found based on your status selections.")
 
         plotted_keys = df_for_plotting['Key'].tolist()
         unplotted_df = df_for_wip_calc[~df_for_wip_calc['Key'].isin(plotted_keys)]
@@ -1075,16 +1054,19 @@ class Dashboard:
         with st.expander("Learn more about this chart", icon="🎓"):
             st.markdown("""- **What it is:** This chart shows the number of work items that are in progress at any given point in time.\n- **How to read it:** The line shows the total count of in-progress items for each day in the selected period.\n- **What to look for:**\n    - **Rising WIP:** A consistent upward trend in WIP is a warning sign. According to Little's Law, if your throughput remains constant, a rising WIP will directly lead to longer cycle times.\n    - **Large Spikes and Drops:** Significant fluctuations in WIP can indicate that work is being started in large batches, which can strain the system. Aim for a stable, limited WIP.\n    - **Relationship to Cycle Time:** Compare the WIP chart with your Cycle Time scatterplot. Periods of high WIP will often correspond to periods of longer cycle times.""")
         st.markdown('</div>', unsafe_allow_html=True)
+        
+        st.divider()
         status_options = ["None"] + list(self.status_mapping.keys())
         col1, col2 = st.columns(2)
         with col1: self.selections["wip_start_status"] = st.selectbox("WIP Start Status", status_options, key="wip_start")
         with col2: self.selections["wip_done_status"] = st.selectbox("WIP End Status", status_options, key="wip_end")
         self.selections["wip_start_col"] = self.status_mapping.get(self.selections["wip_start_status"])
         self.selections["wip_done_col"] = self.status_mapping.get(self.selections["wip_done_status"])
-        st.divider()
+
         if not self.selections["wip_start_col"] or not self.selections["wip_done_col"]:
             st.info("ℹ️ Please select a Start and End Status above to generate the WIP chart.")
             return
+            
         wip_processed_df = DataProcessor.process_dates(self.raw_df, self.selections["wip_start_col"], self.selections["wip_done_col"])
         source_df = self._apply_all_filters(wip_processed_df, apply_date_filter=False)
         chart = ChartGenerator.create_wip_chart(source_df, self.selections['date_range'], self.selections['custom_start_date'], self.selections['custom_end_date'])
@@ -1097,7 +1079,8 @@ class Dashboard:
         with st.expander("Learn more about this chart", icon="🎓"):
             st.markdown("""- **What it is:** This chart shows the number of work items completed per unit of time (e.g., week, fortnight). Throughput is a measure of the team's delivery rate.\n- **How to read it:** Each bar represents a time period, and its height shows the number of items that were completed in that period.\n- **What to look for:**\n    - **Consistency:** A relatively consistent throughput over time indicates a stable and predictable process.\n    - **Variability:** High variability (large spikes and drops) can suggest that work items are not "right-sized" or that the team is being affected by outside interruptions or dependencies.\n    - **Zero Throughput:** Any period with zero throughput is worth investigating.""")
         st.markdown('</div>', unsafe_allow_html=True)
-        st.markdown("Throughput measures the number of work items completed per unit of time. Use the control below to change the time unit.")
+        
+        st.divider()
         col1, col2, col3 = st.columns(3)
         with col1: self.selections["throughput_interval"] = st.selectbox("Interval", Config.THROUGHPUT_INTERVALS, key="throughput_interval_selector")
         with col2:
@@ -1108,7 +1091,7 @@ class Dashboard:
         if self.selections["throughput_interval"] == 'Fortnightly':
             with col3: self.selections['sprint_anchor_date'] = st.date_input("Sprint End Date", value=datetime.now(), help="Select the last day of any Sprint in your team's cadence.")
         self.selections['throughput_status_col'] = self.status_mapping.get(self.selections["throughput_status"])
-        st.divider()
+
         source_df = self._apply_all_filters(self.raw_df, apply_date_filter=False)
         max_date_df = self.raw_df.copy()
         overall_max_date = None
@@ -1126,6 +1109,8 @@ class Dashboard:
         with st.expander("Learn more about forecasting", icon="🎓"):
             st.markdown("""- **What it is:** These charts use a **Monte Carlo simulation** to forecast future outcomes based on your team's historical throughput data. Instead of giving a single, misleading date, it provides a range of outcomes and their probabilities.\n- **How to read it:** The charts run thousands of simulations of your future work to generate a range of possible outcomes. For example, a result might say "There is an 85% chance of completing 12 or more items in the next two weeks."\n- **Why use Monte Carlo?** Traditional forecasting often uses simple averages, which can be misleading and hide risk (the "Flaw of Averages"). A Monte Carlo simulation is a more robust statistical method that accounts for the variability in your past performance.\n- **A Note on "Right-Sizing":** Forecasts are most reliable when the work items are "right-sized." This means each item should be broken down into the smallest possible chunk that still delivers value and can be completed within your team's Service Level Expectation (SLE).""")
         st.markdown('</div>', unsafe_allow_html=True)
+        
+        st.divider()
         throughput_status = self.selections.get('throughput_status')
         if not throughput_status or throughput_status == "None":
             st.info("To run a forecast, first go to the 'Throughput' tab and choose the status that represents work being completed.")
