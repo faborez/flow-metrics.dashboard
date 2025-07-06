@@ -780,7 +780,6 @@ class Dashboard:
         c1.metric("Average Active Time", f"{avg_active_time:.2f} Days", help="The average time items spent in 'active' statuses.")
         c2.metric("Average Cycle Time", f"{avg_cycle_time:.2f} Days", help="The average total time from the selected start to end status.")
         c3.metric("Average Flow Efficiency", f"{avg_efficiency:.1f}%", help="The average percentage of cycle time that was spent in 'active' statuses.")
-        st.divider()
         
         chart = ChartGenerator.create_flow_efficiency_histogram(efficiency_df)
         if chart: 
@@ -803,7 +802,6 @@ class Dashboard:
             """)
         st.markdown('</div>', unsafe_allow_html=True)
 
-        st.divider()
         all_statuses = list(self.status_mapping.keys())
         self.selections['cfd_statuses'] = st.multiselect(
             "Select workflow statuses in order",
@@ -955,7 +953,6 @@ class Dashboard:
             """)
         st.markdown('</div>', unsafe_allow_html=True)
 
-        st.divider()
         status_options = ["None"] + list(self.status_mapping.keys())
         col1, col2 = st.columns(2)
 
@@ -996,7 +993,6 @@ class Dashboard:
             """)
         st.markdown('</div>', unsafe_allow_html=True)
         
-        st.divider()
         status_options = ["None"] + list(self.status_mapping.keys())
         sensible_done_options = [s for s in status_options if s.lower() == 'done']
         default_done_index = status_options.index(sensible_done_options[0]) if sensible_done_options else len(status_options) - 1
@@ -1063,7 +1059,6 @@ class Dashboard:
             st.markdown("""- **What it is:** This chart shows the number of work items that are in progress at any given point in time.\n- **How to read it:** The line shows the total count of in-progress items for each day in the selected period.\n- **What to look for:**\n    - **Rising WIP:** A consistent upward trend in WIP is a warning sign. According to Little's Law, if your throughput remains constant, a rising WIP will directly lead to longer cycle times.\n    - **Large Spikes and Drops:** Significant fluctuations in WIP can indicate that work is being started in large batches, which can strain the system. Aim for a stable, limited WIP.\n    - **Relationship to Cycle Time:** Compare the WIP chart with your Cycle Time scatterplot. Periods of high WIP will often correspond to periods of longer cycle times.""")
         st.markdown('</div>', unsafe_allow_html=True)
         
-        st.divider()
         status_options = ["None"] + list(self.status_mapping.keys())
         col1, col2 = st.columns(2)
         with col1: self.selections["wip_start_status"] = st.selectbox("WIP Start Status", status_options, key="wip_start")
@@ -1088,7 +1083,6 @@ class Dashboard:
             st.markdown("""- **What it is:** This chart shows the number of work items completed per unit of time (e.g., week, fortnight). Throughput is a measure of the team's delivery rate.\n- **How to read it:** Each bar represents a time period, and its height shows the number of items that were completed in that period.\n- **What to look for:**\n    - **Consistency:** A relatively consistent throughput over time indicates a stable and predictable process.\n    - **Variability:** High variability (large spikes and drops) can suggest that work items are not "right-sized" or that the team is being affected by outside interruptions or dependencies.\n    - **Zero Throughput:** Any period with zero throughput is worth investigating.""")
         st.markdown('</div>', unsafe_allow_html=True)
         
-        st.divider()
         col1, col2, col3 = st.columns(3)
         with col1: self.selections["throughput_interval"] = st.selectbox("Interval", Config.THROUGHPUT_INTERVALS, key="throughput_interval_selector")
         with col2:
@@ -1118,7 +1112,6 @@ class Dashboard:
             st.markdown("""- **What it is:** These charts use a **Monte Carlo simulation** to forecast future outcomes based on your team's historical throughput data. Instead of giving a single, misleading date, it provides a range of outcomes and their probabilities.\n- **How to read it:** The charts run thousands of simulations of your future work to generate a range of possible outcomes. For example, a result might say "There is an 85% chance of completing 12 or more items in the next two weeks."\n- **Why use Monte Carlo?** Traditional forecasting often uses simple averages, which can be misleading and hide risk (the "Flaw of Averages"). A Monte Carlo simulation is a more robust statistical method that accounts for the variability in your past performance.\n- **A Note on "Right-Sizing":** Forecasts are most reliable when the work items are "right-sized." This means each item should be broken down into the smallest possible chunk that still delivers value and can be completed within your team's Service Level Expectation (SLE).""")
         st.markdown('</div>', unsafe_allow_html=True)
         
-        st.divider()
         throughput_status = self.selections.get('throughput_status')
         if not throughput_status or throughput_status == "None":
             st.info("To run a forecast, first go to the 'Throughput' tab and choose the status that represents work being completed.")
@@ -1139,7 +1132,7 @@ class Dashboard:
             self.selections["forecast_custom_date"] = None
             if self.selections["forecast_range"] == "Custom":
                 with col2: self.selections["forecast_custom_date"] = st.date_input("Forecast End Date", min_value=datetime.now().date(), value=datetime.now().date() + timedelta(days=30), key="how_many_custom_date")
-            st.divider()
+            
             if self.selections.get("forecast_range") == "Next 30 days": forecast_days = 30
             elif self.selections.get("forecast_range") == "Next 60 days": forecast_days = 60
             elif self.selections.get("forecast_range") == "Next 90 days": forecast_days = 90
@@ -1155,7 +1148,7 @@ class Dashboard:
             with col2: scope_complexity = st.selectbox("Scope Complexity", ['Clear and understood', 'Somewhat understood', 'Not really understood yet', 'Very unclear or not understood'], key="scope_complexity")
             with col3: team_focus = st.selectbox("Team Focus", ['100% (only this work)', '75% (mostly this work)', '50% (half of this work)', '25% (some of this work)'], key="team_focus")
             with col4: forecast_start_date = st.date_input("Forecast start date", value=datetime.now().date(), key="when_forecast_start")
-            st.divider()
+            
             chart, stats = ChartGenerator.create_when_forecast_chart(forecast_source_df, items_to_complete, forecast_start_date, throughput_status_col, scope_complexity, team_focus, self.selections['color_blind_mode'])
             if stats:
                 st.markdown("""<style>.forecast-box { padding: 10px; border-radius: 5px; color: white; text-align: center; margin-bottom: 10px; } .forecast-label { font-size: 1.1em; font-weight: bold; } .forecast-value { font-size: 2em; font-weight: bold; }</style>""", unsafe_allow_html=True)
