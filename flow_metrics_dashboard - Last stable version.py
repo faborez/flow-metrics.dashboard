@@ -672,9 +672,12 @@ class Dashboard:
         st.session_state[prev_key] = st.session_state[key]
 
     def _display_sidebar(self, date_bounds_df: DataFrame):
+        st.sidebar.markdown("## ⚙️ Global Configuration")
+        st.sidebar.caption("Settings that define the core dataset for all charts.")
         self._sidebar_global_filters(date_bounds_df)
         st.sidebar.markdown("---")
         st.sidebar.markdown("## 📊 Chart-Specific Controls")
+        st.sidebar.caption("Customize individual charts.")
         self._sidebar_chart_controls()
 
     def _sidebar_global_filters(self, date_bounds_df: DataFrame):
