@@ -950,6 +950,7 @@ class Dashboard:
                     - **No Correlation (Ideal for Flow):** If there is little to no relationship between story points and cycle time (dots are scattered randomly across different point values), it can indicate that your team is effectively "right-sizing" work. This means you are breaking down work into small, similarly-sized pieces, regardless of the initial estimate. In a mature flow-based system, this is often a desirable outcome.
                     - **Positive Correlation:** If cycle time tends to increase as story points increase, it means your estimates are somewhat predictive of effort. However, a wide vertical spread for any given story point value still indicates high variability.
                     - **High Variability within a Story Point:** If a single story point value (e.g., 5 points) has a very wide range of cycle times (from 5 to 50 days), it highlights that story points are not a reliable predictor of completion time for your team.
+                    - **Unreliable Estimates:** If different story point estimates (e.g., 2, 3, and 5 points) all show a similarly wide range of cycle times, it suggests the assigned estimate has little influence on the actual completion time. This indicates that story points are not a reliable predictor for forecasting when work will be done.
             """)
         st.markdown('</div>', unsafe_allow_html=True)
 
