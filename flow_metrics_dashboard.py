@@ -131,6 +131,7 @@ class DataProcessor:
         return df_clean
 
     @staticmethod
+    @st.cache_data
     def process_dates(df: DataFrame, start_col: Optional[str], completed_col: Optional[str]) -> Optional[DataFrame]:
         try:
             processed_df = df.copy()
@@ -179,6 +180,7 @@ class DataProcessor:
         return df
 
     @staticmethod
+    @st.cache_data
     def calculate_flow_efficiency(df: DataFrame, active_statuses: List[str], all_status_cols: List[str]) -> DataFrame:
         if 'Cycle time' not in df.columns or df.empty or not active_statuses:
             return df.assign(**{'Active Time Days': 0, 'Flow Efficiency': 0})
@@ -619,6 +621,7 @@ class StatsCalculator:
         return {'total': len(df), 'completed': df['Completed date'].notna().sum(), 'in_progress': (df['Start date'].notna() & df['Completed date'].isna()).sum()}
 
     @staticmethod
+    @st.cache_data
     def cycle_time_stats(df: DataFrame) -> Optional[Dict[str, int]]:
         completed = df.dropna(subset=['Cycle time'])
         if completed.empty: return None
@@ -686,11 +689,11 @@ class Dashboard:
         st.session_state[prev_key] = st.session_state[key]
 
     def _display_sidebar(self, date_bounds_df: DataFrame):
-        self._display_static_global_filters(date_bounds_df)
+        self._sidebar_global_filters(date_bounds_df)
         self._sidebar_chart_controls()
         self._display_dynamic_filters()
 
-    def _display_static_global_filters(self, date_bounds_df: DataFrame):
+    def _sidebar_global_filters(self, date_bounds_df: DataFrame):
         st.sidebar.markdown("#### 📋 Global Data Filters")
         st.sidebar.caption("ℹ️ *In multi-selects, 'All' deselects others, and choosing an option deselects 'All'.*")
         work_type_key = 'work_types'
@@ -707,7 +710,7 @@ class Dashboard:
         self.selections['color_blind_mode'] = st.sidebar.checkbox("Enable Color-Blind Friendly Mode")
 
     def _sidebar_chart_controls(self):
-        st.sidebar.markdown("## 📊 Chart-Specific Controls")
+        st.sidebar.markdown("#### 📊 Chart-Specific Controls")
         with st.sidebar.expander("📈 Cycle Time & Age Percentiles", expanded=True):
             show_percentiles = st.checkbox("Show Percentile Lines", value=True)
             self.selections["percentiles"] = {f"show_{p}th": show_percentiles for p in Config.PERCENTILES}
