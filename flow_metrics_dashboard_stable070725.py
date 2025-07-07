@@ -686,11 +686,12 @@ class Dashboard:
         st.session_state[prev_key] = st.session_state[key]
 
     def _display_sidebar(self, date_bounds_df: DataFrame):
-        self._display_static_global_filters(date_bounds_df)
+        self._sidebar_global_filters(date_bounds_df)
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("## 📊 Chart-Specific Controls")
         self._sidebar_chart_controls()
-        self._display_dynamic_filters()
 
-    def _display_static_global_filters(self, date_bounds_df: DataFrame):
+    def _sidebar_global_filters(self, date_bounds_df: DataFrame):
         st.sidebar.markdown("#### 📋 Global Data Filters")
         st.sidebar.caption("ℹ️ *In multi-selects, 'All' deselects others, and choosing an option deselects 'All'.*")
         work_type_key = 'work_types'
@@ -705,17 +706,6 @@ class Dashboard:
             self.selections["custom_end_date"] = st.sidebar.date_input("End date", value=max_val if pd.notna(max_val) else datetime.now().date(), min_value=min_val, max_value=max_val)
         self.selections["exclude_long_cycle_times"] = st.sidebar.checkbox("Exclude cycle time > 365 days", value=False)
         self.selections['color_blind_mode'] = st.sidebar.checkbox("Enable Color-Blind Friendly Mode")
-
-    def _sidebar_chart_controls(self):
-        st.sidebar.markdown("## 📊 Chart-Specific Controls")
-        with st.sidebar.expander("📈 Cycle Time & Age Percentiles", expanded=True):
-            show_percentiles = st.checkbox("Show Percentile Lines", value=True)
-            self.selections["percentiles"] = {f"show_{p}th": show_percentiles for p in Config.PERCENTILES}
-            if show_percentiles:
-                c1, c2 = st.columns(2)
-                for p, col in zip(Config.PERCENTILES, [c1, c2, c1, c2]): self.selections["percentiles"][f"show_{p}th"] = col.checkbox(f"{p}th", value=True, key=f"{p}th_visible")
-    
-    def _display_dynamic_filters(self):
         st.sidebar.markdown("#### Dynamic Column Filters")
         if not self.filterable_columns:
             st.sidebar.info("No additional filterable columns found.")
@@ -732,6 +722,14 @@ class Dashboard:
                     if session_key not in st.session_state: st.session_state[session_key] = ['All']
                     st.sidebar.multiselect(f_name, ["All"] + unique_vals, key=session_key, on_change=self._handle_multiselect, args=(session_key,))
                     self.selections[f_name] = st.session_state[session_key]
+
+    def _sidebar_chart_controls(self):
+        with st.sidebar.expander("📈 Cycle Time & Age Percentiles"):
+            show_percentiles = st.checkbox("Show Percentile Lines", value=True)
+            self.selections["percentiles"] = {f"show_{p}th": show_percentiles for p in Config.PERCENTILES}
+            if show_percentiles:
+                c1, c2 = st.columns(2)
+                for p, col in zip(Config.PERCENTILES, [c1, c2, c1, c2]): self.selections["percentiles"][f"show_{p}th"] = col.checkbox(f"{p}th", value=True, key=f"{p}th_visible")
 
     def _get_unique_values(self, series: pd.Series, filter_type: str) -> List[str]:
         if series.dropna().empty: return []
@@ -953,6 +951,7 @@ class Dashboard:
         with ct_tabs[4]:
             st.markdown("This chart shows the average time items spend in each status column of your raw data export.")
             status_cols = list(self.status_mapping.values())
+            # FIX: Use self.processed_df to include all items regardless of date filter, not self.filtered_df
             chart, chart_data = ChartGenerator.create_time_in_status_chart(self.processed_df, status_cols)
             if chart:
                 st.plotly_chart(chart, use_container_width=True)
