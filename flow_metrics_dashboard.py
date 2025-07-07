@@ -149,7 +149,7 @@ class DataProcessor:
     @staticmethod
     def _parse_date_part(part: str) -> Optional[datetime]:
         part = part.strip()
-        formats_to_try = ['%d/%m/%Y %H:%M', '%Y-%m-%d %H:%M', '%d/%m/%Y', '%Y-%m-%d']
+        formats_to_try = ['%d-%b-%y %H:%M', '%d/%m/%Y %H:%M', '%Y-%m-%d %H:%M', '%d/%m/%Y', '%Y-%m-%d']
         for fmt in formats_to_try:
             try: return datetime.strptime(part, fmt)
             except ValueError: continue
@@ -468,7 +468,8 @@ class ChartGenerator:
             throughput_df['Period Interval'] = pd.cut(throughput_df['Throughput Date'], bins=bins, right=True, include_lowest=True, labels=bins[1:])
             throughput_df.dropna(subset=['Period Interval'], inplace=True)
             agg_df = throughput_df.groupby('Period Interval').agg(Throughput=('Key', 'count'), Details=('Work type', lambda s: '<br>'.join(f"{wt}: {count}" for wt, count in s.value_counts().items()))).reset_index()
-            agg_df['Period End'], agg_df['Period Start'] = pd.to_datetime(agg_df['Period Interval']), agg_df['Period End'] - pd.DateOffset(days=13)
+            agg_df['Period End'] = pd.to_datetime(agg_df['Period Interval'])
+            agg_df['Period Start'] = agg_df['Period End'] - pd.DateOffset(days=13)
         else:
             freq_string = 'W-MON' if interval == 'Weekly' else 'MS'
             agg_df = throughput_df.groupby(pd.Grouper(key='Throughput Date', freq=freq_string)).agg(Throughput=('Key', 'count'), Details=('Work type', lambda s: '<br>'.join(f"{wt}: {count}" for wt, count in s.value_counts().items()))).reset_index()
