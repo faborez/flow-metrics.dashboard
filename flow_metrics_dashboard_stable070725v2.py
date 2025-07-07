@@ -181,46 +181,32 @@ class DataProcessor:
 
     @staticmethod
     @st.cache_data
-    def calculate_flow_efficiency(df: DataFrame, wait_statuses: List[str], all_status_cols: List[str]) -> DataFrame:
-        if 'Cycle time' not in df.columns or df.empty:
-            return df.assign(**{'Active Time Days': 0, 'Wait Time Days': 0, 'Flow Efficiency': 0})
-        
-        df_eff = df.dropna(subset=['Cycle time', 'Start date', 'Completed date']).copy()
-        wait_time_days_list = []
-
+    def calculate_flow_efficiency(df: DataFrame, active_statuses: List[str], all_status_cols: List[str]) -> DataFrame:
+        if 'Cycle time' not in df.columns or df.empty or not active_statuses:
+            return df.assign(**{'Active Time Days': 0, 'Flow Efficiency': 0})
+        df_eff = df.dropna(subset=['Cycle time']).copy()
+        active_time_days_list = []
         for _, row in df_eff.iterrows():
-            total_wait_time = timedelta(0)
+            total_active_time = timedelta(0)
             timestamps = []
             for col in all_status_cols:
                 ts = DataProcessor._extract_latest_date(row[col])
-                if pd.notna(ts):
-                    timestamps.append((ts, col.replace("'->", "").strip()))
-
+                if pd.notna(ts): timestamps.append((ts, col.replace("'->", "").strip()))
             if len(timestamps) < 2:
-                wait_time_days_list.append(0)
+                active_time_days_list.append(0)
                 continue
-
             timestamps.sort()
-            
-            # Only consider transitions within the item's cycle time
-            cycle_timestamps = [t for t in timestamps if row['Start date'] <= t[0] <= row['Completed date']]
-
-            for i in range(len(cycle_timestamps) - 1):
-                start_time, status_name = cycle_timestamps[i]
-                end_time, _ = cycle_timestamps[i+1]
-                if status_name in wait_statuses:
+            for i in range(len(timestamps) - 1):
+                start_time, status_name = timestamps[i]
+                end_time, _ = timestamps[i+1]
+                if status_name in active_statuses:
                     duration = end_time - start_time
-                    if duration.total_seconds() > 0:
-                        total_wait_time += duration
-            
-            wait_time_days_list.append(total_wait_time.total_seconds() / (24 * 3600))
-
-        df_eff['Wait Time Days'] = wait_time_days_list
-        df_eff['Active Time Days'] = df_eff['Cycle time'] - df_eff['Wait Time Days']
+                    if duration.total_seconds() > 0: total_active_time += duration
+            active_time_days_list.append(total_active_time.total_seconds() / (24 * 3600))
+        df_eff['Active Time Days'] = active_time_days_list
         df_eff['Flow Efficiency'] = (df_eff['Active Time Days'] / df_eff['Cycle time']) * 100
         df_eff['Flow Efficiency'] = df_eff['Flow Efficiency'].clip(0, 100)
-        
-        return df.merge(df_eff[['Key', 'Active Time Days', 'Wait Time Days', 'Flow Efficiency']], on='Key', how='left').fillna({'Flow Efficiency': 0, 'Active Time Days': 0, 'Wait Time Days': 0})
+        return df.merge(df_eff[['Key', 'Active Time Days', 'Flow Efficiency']], on='Key', how='left').fillna({'Flow Efficiency': 0, 'Active Time Days': 0})
 
 class ChartGenerator:
     """Generates Plotly charts for the dashboard."""
@@ -703,11 +689,11 @@ class Dashboard:
         st.session_state[prev_key] = st.session_state[key]
 
     def _display_sidebar(self, date_bounds_df: DataFrame):
-        self._display_static_global_filters(date_bounds_df)
+        self._sidebar_global_filters(date_bounds_df)
         self._sidebar_chart_controls()
         self._display_dynamic_filters()
 
-    def _display_static_global_filters(self, date_bounds_df: DataFrame):
+    def _sidebar_global_filters(self, date_bounds_df: DataFrame):
         st.sidebar.markdown("#### 📋 Global Data Filters")
         st.sidebar.caption("ℹ️ *In multi-selects, 'All' deselects others, and choosing an option deselects 'All'.*")
         work_type_key = 'work_types'
@@ -755,7 +741,6 @@ class Dashboard:
         return sorted(series.dropna().astype(str).str.split(',').explode().str.strip().unique()) if filter_type == "multi" else sorted(series.dropna().unique())
 
     def _apply_all_filters(self, source_df: pd.DataFrame, apply_date_filter: bool) -> pd.DataFrame:
-        if source_df is None: return pd.DataFrame()
         df = source_df.copy()
         if self.selections.get("exclude_long_cycle_times") and 'Cycle time' in df.columns: df = df[df['Cycle time'] <= 365]
         if "All" not in self.selections.get("work_types", ["All"]): df = df[df["Work type"].isin(self.selections["work_types"])]
@@ -796,12 +781,8 @@ class Dashboard:
         st.markdown('<div class="guidance-expander">', unsafe_allow_html=True)
         with st.expander("Learn more about this chart", icon="🎓"):
             st.markdown("""
-                - **What it is:** Flow Efficiency is the percentage of time that work items spend in 'active' work states versus 'wait' states. It's a key indicator of waste in your workflow.
-                - **What are Active and Wait states?**
-                    - **Active states** are any stage where someone is actively working on the item (e.g., 'In Progress', 'In Review', 'In Testing').
-                    - **Wait states** (or Queues) are any stage where an item is idle and waiting for the next step (e.g., 'To Do', 'Ready for Dev', 'Ready for Test').
-                - **Why it matters?** This chart helps you determine if your cycle times are long because of the work itself or because items are spending too much time sitting idle in waiting queues.
-                - **Sanity Check:** A high flow efficiency score can be misleading. It only measures the efficiency of items that have *completed* the full cycle. If many items are getting stuck in a wait state and never finishing, they won't be included in this calculation. Always compare the "Average Wait Time" metric with the "Where is the time going?" chart below. A large difference between these two indicates a hidden bottleneck.
+                - **What it is:** Flow Efficiency is the percentage of time that work items spend in 'active' work states versus 'wait' states. It's a key indicator of waste in a workflow.
+                - **How to read it:** A higher percentage is better. A low score indicates items spend significant time waiting in queues. The histogram shows the distribution of efficiency scores.
                 - **Formula:** `Flow Efficiency = (Total Active Time / Total Cycle Time) * 100`
             """)
         st.markdown('</div>', unsafe_allow_html=True)
@@ -811,58 +792,29 @@ class Dashboard:
             return
 
         start_status, end_status = self.selections.get('start_status'), self.selections.get('completed_status')
-        st.info(f"**Calculation based on:**\n- **Cycle Time from:** `{start_status}` to `{end_status}` (set on the Cycle Time tab).\n- **Wait/Queue Statuses:** Please select the statuses below that represent idle/waiting time.")
+        st.info(f"**Calculation based on:**\n- **Cycle Time from:** `{start_status}` to `{end_status}` (set on the Cycle Time tab).\n- **Active Statuses:** Please select the statuses below that represent 'active' work, not waiting.")
 
-        all_statuses_ordered = list(self.status_mapping.keys())
-        selectable_wait_statuses = []
-        try:
-            start_index = all_statuses_ordered.index(start_status)
-            end_index = all_statuses_ordered.index(end_status)
-            if start_index < end_index:
-                selectable_wait_statuses = all_statuses_ordered[start_index + 1 : end_index]
-        except (ValueError, TypeError):
-            pass
-
-        default_wait = [s for s in selectable_wait_statuses if s.lower() in ['to do', 'ready for dev', 'ready for test']]
-        wait_statuses = st.multiselect("Select Wait/Queue Statuses", selectable_wait_statuses, default=default_wait, help="Select statuses that represent idle/waiting time.")
+        all_statuses = list(self.status_mapping.keys())
+        default_active = [s for s in all_statuses if s.lower() in ['development', 'in review', 'in progress']]
+        active_statuses = st.multiselect("Select Active Work Statuses", all_statuses, default=default_active, help="Select statuses that represent 'active' work, not waiting.")
         
-        if not wait_statuses:
-            st.warning("Please select one or more 'Wait/Queue' statuses to calculate Flow Efficiency.")
+        if not active_statuses:
+            st.warning("Please select one or more 'Active' statuses to calculate Flow Efficiency.")
             return
 
-        efficiency_df = DataProcessor.calculate_flow_efficiency(self.filtered_df, wait_statuses, list(self.status_mapping.values()))
-        
-        if efficiency_df.empty or efficiency_df['Cycle time'].isnull().all():
-            st.warning("No data available to calculate Flow Efficiency with the current filters.")
-            return
-
+        efficiency_df = DataProcessor.calculate_flow_efficiency(self.filtered_df, active_statuses, list(self.status_mapping.values()))
+        avg_active_time = efficiency_df['Active Time Days'].mean()
         avg_cycle_time = efficiency_df['Cycle time'].mean()
-        avg_wait_time = efficiency_df['Wait Time Days'].mean()
-        avg_active_time = avg_cycle_time - avg_wait_time
-        avg_efficiency = (avg_active_time / avg_cycle_time) * 100 if avg_cycle_time > 0 else 0
+        avg_efficiency = efficiency_df['Flow Efficiency'].mean()
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Average Active Time", f"{avg_active_time:.2f} Days", help="Average Cycle Time - Average Wait Time")
-        c2.metric("Average Wait Time", f"{avg_wait_time:.2f} Days", help="The average time items spent in the selected wait statuses.")
-        c3.metric("Average Cycle Time", f"{avg_cycle_time:.2f} Days", help="The average total time from the selected start to end status. Calculated as Average Active Time + Average Wait Time.")
-        c4.metric("Overall Average Flow Efficiency", f"{avg_efficiency:.1f}%", help="Calculated as (Average Active Time / Average Cycle Time) * 100")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Average Active Time", f"{avg_active_time:.2f} Days", help="The average time items spent in 'active' statuses.")
+        c2.metric("Average Cycle Time", f"{avg_cycle_time:.2f} Days", help="The average total time from the selected start to end status.")
+        c3.metric("Average Flow Efficiency", f"{avg_efficiency:.1f}%", help="The average percentage of cycle time that was spent in 'active' statuses.")
         
         chart = ChartGenerator.create_flow_efficiency_histogram(efficiency_df)
         if chart: 
             st.plotly_chart(chart, use_container_width=True)
-            with st.expander("Where is the time going? (Time in Status)", expanded=True):
-                st.markdown("""
-                    **This chart acts as a sanity check for your Flow Efficiency.**
-                    - The **Average Wait Time** metric above is for items that finished the full cycle (the "happy path").
-                    - This chart shows the average time spent in each status for *all* items, including those that got stuck (the "unhappy path").
-                    - If a wait status here shows a much higher average than the "Average Wait Time" above, it indicates a hidden bottleneck where items are getting stuck and not completing the process.
-                """)
-                status_cols = list(self.status_mapping.values())
-                time_in_status_chart, _ = ChartGenerator.create_time_in_status_chart(self.filtered_df, status_cols)
-                if time_in_status_chart:
-                    st.plotly_chart(time_in_status_chart, use_container_width=True)
-                else:
-                    st.warning("Not enough data to display the Time in Status chart.")
         else: 
             st.warning("⚠️ Could not calculate Flow Efficiency. Check selections and ensure there are completed items.")
 
@@ -1004,7 +956,7 @@ class Dashboard:
         with ct_tabs[4]:
             st.markdown("This chart shows the average time items spend in each status column of your raw data export.")
             status_cols = list(self.status_mapping.values())
-            chart, chart_data = ChartGenerator.create_time_in_status_chart(self.filtered_df, status_cols)
+            chart, chart_data = ChartGenerator.create_time_in_status_chart(self.processed_df, status_cols)
             if chart:
                 st.plotly_chart(chart, use_container_width=True)
                 if chart_data is not None and not chart_data.empty:
