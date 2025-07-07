@@ -134,8 +134,13 @@ class DataProcessor:
     def process_dates(df: DataFrame, start_col: Optional[str], completed_col: Optional[str]) -> Optional[DataFrame]:
         try:
             processed_df = df.copy()
-            processed_df['Start date'] = processed_df[start_col].apply(DataProcessor._extract_earliest_date) if start_col else pd.NaT
-            processed_df['Completed date'] = processed_df[completed_col].apply(DataProcessor._extract_latest_date) if completed_col else pd.NaT
+            
+            start_dates = processed_df[start_col].apply(DataProcessor._extract_earliest_date) if start_col else pd.Series(pd.NaT, index=df.index)
+            completed_dates = processed_df[completed_col].apply(DataProcessor._extract_latest_date) if completed_col else pd.Series(pd.NaT, index=df.index)
+            
+            processed_df['Start date'] = pd.to_datetime(start_dates, errors='coerce')
+            processed_df['Completed date'] = pd.to_datetime(completed_dates, errors='coerce')
+
             return DataProcessor._calculate_cycle_time(processed_df)
         except Exception as e:
             st.error(f"Error processing dates: {str(e)}")
@@ -357,8 +362,16 @@ class ChartGenerator:
     @staticmethod
     @st.cache_data
     def create_story_point_chart(df: DataFrame, is_color_blind_mode: bool) -> Optional[Figure]:
-        sp_col_name = 'Story Points' if 'Story Points' in df.columns else 'Story point estimate' if 'Story point estimate' in df.columns else None
+        sp_col_name = None
+        potential_sp_cols = ['story points', 'story point estimate']
+        for col in df.columns:
+            if col.strip().lower() in potential_sp_cols:
+                if pd.to_numeric(df[col], errors='coerce').notna().any():
+                    sp_col_name = col
+                    break
+        
         if not sp_col_name: return None
+        
         df_sp = df.dropna(subset=['Cycle time', sp_col_name]).copy()
         df_sp = df_sp[pd.to_numeric(df_sp[sp_col_name], errors='coerce').notna()]
         df_sp[sp_col_name] = pd.to_numeric(df_sp[sp_col_name])
@@ -738,12 +751,24 @@ class Dashboard:
 
     def _display_charts(self):
         tab_list = ["📈 Cycle Time", "🔄 Process Flow", "📊 Work Item Age", "⏱️ Flow Efficiency", "🔄 WIP Trend", "📊 Throughput", "🔮 Throughput Forecast"]
-        sp_col_name = next((col for col in ['Story Points', 'Story point estimate'] if col in self.raw_df.columns and pd.to_numeric(self.raw_df[col], errors='coerce').notna().any()), None)
-        if sp_col_name: tab_list.append("📈 Story Point Analysis")
+        
+        potential_sp_cols = ['story points', 'story point estimate']
+        sp_col_name = None
+        for col in self.raw_df.columns:
+            if col.strip().lower() in potential_sp_cols:
+                if pd.to_numeric(self.raw_df[col], errors='coerce').notna().any():
+                    sp_col_name = col
+                    break
+        
+        if sp_col_name:
+            tab_list.append("📈 Story Point Analysis")
+            
         tabs = st.tabs(tab_list)
         tab_map = {"📈 Cycle Time": self._display_cycle_time_charts, "🔄 Process Flow": self._display_cfd_chart, "📊 Work Item Age": self._display_work_item_age_chart, "⏱️ Flow Efficiency": self._display_flow_efficiency_chart, "🔄 WIP Trend": self._display_wip_chart, "📊 Throughput": self._display_throughput_chart, "🔮 Throughput Forecast": self._display_forecast_charts, "📈 Story Point Analysis": self._display_story_point_chart}
         for i, tab_title in enumerate(tab_list):
-            with tabs[i]: tab_map[tab_title]()
+            with tabs[i]: 
+                if tab_title in tab_map:
+                    tab_map[tab_title]()
 
     def _display_flow_efficiency_chart(self):
         st.header("Flow Efficiency Analysis")
@@ -925,7 +950,8 @@ class Dashboard:
         with ct_tabs[4]:
             st.markdown("This chart shows the average time items spend in each status column of your raw data export.")
             status_cols = list(self.status_mapping.values())
-            chart, chart_data = ChartGenerator.create_time_in_status_chart(self.filtered_df, status_cols)
+            # FIX: Use self.processed_df to include all items regardless of date filter, not self.filtered_df
+            chart, chart_data = ChartGenerator.create_time_in_status_chart(self.processed_df, status_cols)
             if chart:
                 st.plotly_chart(chart, use_container_width=True)
                 if chart_data is not None and not chart_data.empty:
@@ -970,6 +996,11 @@ class Dashboard:
             return
 
         sp_processed_df = DataProcessor.process_dates(self.raw_df, self.selections["sp_start_col"], self.selections["sp_end_col"])
+        
+        if sp_processed_df is None:
+            st.warning("Could not process dates with the selected status columns. Please check your data or selections.")
+            return
+
         sp_filtered_df = self._apply_all_filters(sp_processed_df, apply_date_filter=True)
 
         chart = ChartGenerator.create_story_point_chart(sp_filtered_df, self.selections['color_blind_mode'])
