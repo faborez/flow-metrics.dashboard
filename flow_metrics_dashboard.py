@@ -82,7 +82,23 @@ class StatusManager:
     """Handles status column extraction and validation."""
     @staticmethod
     def extract_status_columns(df: DataFrame) -> Dict[str, str]:
-        return {col.replace("'->", "").strip(): col for col in df.columns if col.startswith("'->")}
+        
+        def clean_status_name(status_name):
+            """Removes known suffixes from a status name for comparison."""
+            name = str(status_name).strip()
+            name = name.replace("'->", "").strip()
+            name = re.sub(r'-\d+$', '', name)
+            name = re.sub(r'-DPID$', '', name)
+            return name.strip()
+
+        status_col_map = {col.replace("'->", "").strip(): col for col in df.columns if col.startswith("'->")}
+        
+        cleaned_status_col_map = {}
+        for status_name, raw_col in status_col_map.items():
+            cleaned_name = clean_status_name(status_name)
+            cleaned_status_col_map[cleaned_name] = raw_col
+            
+        return cleaned_status_col_map
 
     @staticmethod
     def validate_status_order(df: DataFrame, start_col: Optional[str], completed_col: Optional[str]) -> Tuple[bool, str]:
@@ -339,11 +355,27 @@ class ChartGenerator:
         return fig
 
     @staticmethod
-    def create_work_item_age_chart(plot_df: DataFrame, wip_df: DataFrame, status_order: List[str], cycle_time_percentiles: Dict[str, int], percentile_settings: Dict[str, bool], is_color_blind_mode: bool) -> Optional[Figure]:
+    def create_work_item_age_chart(plot_df: DataFrame, wip_df: DataFrame, status_order: List[str], status_col_map: Dict[str, str], cycle_time_percentiles: Dict[str, int], percentile_settings: Dict[str, bool], is_color_blind_mode: bool) -> Optional[Figure]:
+        
+        def clean_status_name(status_name):
+            """Removes known suffixes from a status name for comparison."""
+            name = str(status_name).strip()
+            name = re.sub(r'-\d+$', '', name)
+            name = re.sub(r'-DPID$', '', name)
+            return name.strip()
+
         age_data = []
         for _, row in plot_df.iterrows():
             start_date_val = row.get('Start date')
-            if pd.notna(start_date_val): age_data.append({'Key': row['Key'], 'Work type': row['Work type'], 'Status': row['Status'], 'Age': (datetime.now() - start_date_val).days + 1, 'Start date': start_date_val})
+            if pd.notna(start_date_val): 
+                age_data.append({
+                    'Key': row['Key'], 
+                    'Work type': row['Work type'], 
+                    'Status': row['Status'], 
+                    'Age': (datetime.now() - start_date_val).days + 1, 
+                    'Start date': start_date_val
+                })
+
         chart_df = pd.DataFrame(age_data) if age_data else pd.DataFrame(columns=['Key', 'Work type', 'Status', 'Age', 'Start date'])
         if not chart_df.empty:
             status_map = {status: i for i, status in enumerate(status_order)}
@@ -360,10 +392,13 @@ class ChartGenerator:
         max_age_plot = chart_df['Age'].max() if not chart_df.empty else 10
         y_axis_max = max_age_plot * 1.15
         fig.update_layout(title="Work Item Age Analysis", yaxis_title="<b>Age (Calendar Days)</b>", height=675, legend_title="Work Type", xaxis=dict(title_text="", tickvals=list(range(len(status_order))), ticktext=[f"<b>{s}</b>" for s in status_order], tickfont=dict(size=14), showgrid=False, zeroline=False), yaxis=dict(showgrid=True, zeroline=True, zerolinewidth=1, zerolinecolor='LightGrey', tickfont=dict(size=14), title_font=dict(size=16), range=[0, y_axis_max]), showlegend=True)
+        
+        wip_counts_by_status = chart_df['Status'].value_counts().to_dict()
         for i, status in enumerate(status_order):
             if i > 0: fig.add_vline(x=i - 0.5, line_width=2, line_color='LightGrey')
-            count = len(wip_df[wip_df['Status'] == status])
+            count = wip_counts_by_status.get(status, 0)
             fig.add_annotation(x=i, y=y_axis_max, text=f"<b>WIP = {count}</b>", showarrow=False, font=dict(size=14, color="black"), yanchor="bottom", yshift=5)
+        
         if cycle_time_percentiles:
             percentile_colors = ColorManager.get_percentile_colors(is_color_blind_mode)
             x_range_for_lines = [-0.5, len(status_order) - 0.5]
@@ -1101,24 +1136,28 @@ class Dashboard:
             return
 
         try:
-            raw_cols = list(self.raw_df.columns)
-            start_idx, end_idx = raw_cols.index(self.selections["age_start_col"]), raw_cols.index(self.selections["age_end_col"])
-            status_order = [s.replace("'->", "").strip() for s in raw_cols[start_idx : end_idx + 1]]
+            # Use the original, non-cleaned keys for ordering
+            raw_status_keys = list(StatusManager.extract_status_columns(self.raw_df).keys())
+            start_idx = raw_status_keys.index(self.selections["age_start_status"])
+            end_idx = raw_status_keys.index(self.selections["age_end_status"])
+            status_order = [s.replace("'->", "").strip() for s in raw_status_keys[start_idx : end_idx + 1]]
         except (ValueError, IndexError):
             st.error("Could not determine status order for the chart axis. Check your axis status selections.")
             return
 
-        final_col = self.selections["age_true_final_col"]
-        df_in_progress = self.raw_df[self.raw_df[final_col].apply(lambda x: pd.isna(DataProcessor._extract_latest_date(x)))].copy()
-        df_for_wip_calc = df_in_progress[df_in_progress['Status'].isin(status_order)].copy()
-        df_for_wip_calc = self._apply_all_filters(df_for_wip_calc, apply_date_filter=False)
-        start_col = self.selections["age_start_col"]
-        df_for_plotting = df_for_wip_calc.copy()
-        df_for_plotting['Start date'] = df_for_plotting[start_col].apply(DataProcessor._extract_latest_date)
-        df_for_plotting.dropna(subset=['Start date'], inplace=True)
+        wip_df = self.raw_df[
+            self.raw_df[self.selections["age_start_col"]].apply(lambda x: pd.notna(DataProcessor._extract_latest_date(x))) &
+            self.raw_df[self.selections["age_true_final_col"]].apply(lambda x: pd.isna(DataProcessor._extract_latest_date(x)))
+        ].copy()
+        
+        wip_df['Start date'] = wip_df[self.selections["age_start_col"]].apply(DataProcessor._extract_latest_date)
+        wip_df = self._apply_all_filters(wip_df, apply_date_filter=False)
+        
+        plot_df = wip_df[wip_df['Status'].isin(status_order)]
+
         cycle_stats = StatsCalculator.cycle_time_stats(self.filtered_df) if self.filtered_df is not None and not self.filtered_df.empty else None
 
-        chart = ChartGenerator.create_work_item_age_chart(df_for_plotting, df_for_wip_calc, status_order, cycle_stats or {}, self.selections["percentiles"], self.selections['color_blind_mode'])
+        chart = ChartGenerator.create_work_item_age_chart(plot_df, wip_df, status_order, self.status_mapping, cycle_stats or {}, self.selections["percentiles"], self.selections['color_blind_mode'])
         if chart: 
             st.info("""
             - WIP counts at the top show all in-progress items currently in that status.
@@ -1128,14 +1167,6 @@ class Dashboard:
             st.plotly_chart(chart, use_container_width=True)
         else: 
             st.warning("No work items currently in progress were found based on your status selections.")
-
-        plotted_keys = df_for_plotting['Key'].tolist()
-        unplotted_df = df_for_wip_calc[~df_for_wip_calc['Key'].isin(plotted_keys)]
-
-        if not unplotted_df.empty:
-            with st.expander(f"#### View {len(unplotted_df)} item(s) counted in WIP but not aged from '{self.selections['age_start_status']}'"):
-                st.markdown(f"These items are included in WIP counts but do not have a start date in the **'{self.selections['age_start_status']}'** column, so their age cannot be plotted from that point.")
-                st.dataframe(self.raw_df[self.raw_df['Key'].isin(unplotted_df['Key'])][['Key', 'Work type', 'Status'] + list(self.status_mapping.values())])
 
     def _display_wip_chart(self):
         st.header("Work In Progress (WIP) Trend")
