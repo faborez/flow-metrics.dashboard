@@ -499,41 +499,78 @@ class ChartGenerator:
         throughput_df['Throughput Date'] = throughput_df[throughput_status_col].apply(DataProcessor._extract_latest_date)
         throughput_df.dropna(subset=['Throughput Date'], inplace=True)
         if throughput_df.empty: return None, None
+
+        # Logic for Fortnightly sprints remains custom
         if interval == 'Fortnightly':
             if not sprint_anchor_date:
                 st.warning("For fortnightly throughput, please select a 'Sprint End Date' to set the 2-week cycle.")
                 return None, None
-            anchor, min_date, max_date_in_data = pd.to_datetime(sprint_anchor_date), throughput_df['Throughput Date'].min(), throughput_df['Throughput Date'].max()
+            anchor = pd.to_datetime(sprint_anchor_date)
+            min_date, max_date_in_data = throughput_df['Throughput Date'].min(), throughput_df['Throughput Date'].max()
             bins = [anchor]
             temp_date_back = anchor
             while temp_date_back > min_date:
                 temp_date_back -= timedelta(days=14)
                 bins.insert(0, temp_date_back)
+            
             temp_date_forward = anchor
             while temp_date_forward < max_date_in_data:
                 temp_date_forward += timedelta(days=14)
                 bins.append(temp_date_forward)
+            
             bins = sorted(list(set(bins)))
-            throughput_df['Period Interval'] = pd.cut(throughput_df['Throughput Date'], bins=bins, right=True, include_lowest=True, labels=bins[1:])
-            throughput_df.dropna(subset=['Period Interval'], inplace=True)
-            agg_df = throughput_df.groupby('Period Interval').agg(Throughput=('Key', 'count'), Details=('Work type', lambda s: '<br>'.join(f"{wt}: {count}" for wt, count in s.value_counts().items()))).reset_index()
-            agg_df['Period End'] = pd.to_datetime(agg_df['Period Interval'])
+            
+            # Adjust bin edges to be the end of the day (23:59:59)
+            adjusted_bins = [pd.to_datetime(edge).normalize() + pd.Timedelta(days=1, nanoseconds=-1) for edge in bins]
+            
+            throughput_df['Period End'] = pd.cut(throughput_df['Throughput Date'], bins=adjusted_bins, right=True, include_lowest=True, labels=bins[1:])
+            throughput_df.dropna(subset=['Period End'], inplace=True)
+            
+            agg_df = throughput_df.groupby('Period End').agg(
+                Throughput=('Key', 'count'), 
+                Details=('Work type', lambda s: '<br>'.join(f"{wt}: {count}" for wt, count in s.value_counts().items()))
+            ).reset_index()
+
+            agg_df['Period End'] = pd.to_datetime(agg_df['Period End'])
             agg_df['Period Start'] = agg_df['Period End'] - pd.DateOffset(days=13)
+        
         else:
-            freq_string = 'W-MON' if interval == 'Weekly' else 'MS'
-            agg_df = throughput_df.groupby(pd.Grouper(key='Throughput Date', freq=freq_string)).agg(Throughput=('Key', 'count'), Details=('Work type', lambda s: '<br>'.join(f"{wt}: {count}" for wt, count in s.value_counts().items()))).reset_index()
-            agg_df.rename(columns={'Throughput Date': 'Period Start'}, inplace=True)
-            agg_df['Period End'] = agg_df['Period Start'] + (pd.DateOffset(days=6) if interval == 'Weekly' else pd.offsets.MonthEnd(0))
+            # Use the robust pd.Grouper for standard Weekly and Monthly intervals
+            if interval == 'Weekly':
+                freq_string = 'W-SUN'  # Use Sunday-ending weeks
+            else:  # Monthly
+                freq_string = 'M'  # Use Month-end frequency
+            
+            agg_df = throughput_df.groupby(pd.Grouper(key='Throughput Date', freq=freq_string)).agg(
+                Throughput=('Key', 'count'), 
+                Details=('Work type', lambda s: '<br>'.join(f"{wt}: {count}" for wt, count in s.value_counts().items()))
+            ).reset_index()
+            
+            agg_df.rename(columns={'Throughput Date': 'Period End'}, inplace=True)
+
+            if interval == 'Weekly':
+                agg_df['Period Start'] = agg_df['Period End'] - pd.DateOffset(days=6)
+            else:  # Monthly
+                agg_df['Period Start'] = agg_df['Period End'].apply(lambda d: d.replace(day=1))
+        
+        # --- Common logic for all intervals ---
         agg_df = _apply_date_filter(agg_df, 'Period End', date_range, custom_start_date, custom_end_date)
         if agg_df.empty or (overall_max_date and agg_df[agg_df['Period Start'] <= overall_max_date].empty): return None, None
         if overall_max_date: agg_df = agg_df[agg_df['Period Start'] <= overall_max_date]
+        
         agg_df = agg_df.sort_values(by='Period Start')
         agg_df['Period_End_Formatted'] = agg_df['Period End'].dt.strftime('%d/%m/%Y')
         agg_df['Details'] = "<b>Breakdown:</b><br>" + agg_df['Details']
-        agg_df['Period Label'] = agg_df['Period End'].dt.strftime('%b %Y' if interval == 'Monthly' else '%d %b %Y')
+        
+        if interval == 'Monthly':
+            agg_df['Period Label'] = agg_df['Period End'].dt.strftime('%b %Y')
+        else:
+            agg_df['Period Label'] = agg_df['Period End'].dt.strftime('%d %b %Y')
+
         fig = px.bar(agg_df, x='Period Label', y="Throughput", title=f"Throughput per {interval.replace('ly', '')}", text="Throughput")
         fig.update_traces(textposition='outside', hovertemplate=ChartConfig.THROUGHPUT_CHART_HOVER, customdata=agg_df[['Period_End_Formatted', 'Details']].values)
         fig.update_layout(height=600, yaxis_range=[0, agg_df['Throughput'].max() * 1.15], xaxis_title="Period Ending", xaxis_categoryorder="array", xaxis_categoryarray=agg_df['Period Label'].tolist())
+        
         return fig, agg_df
 
     @staticmethod
