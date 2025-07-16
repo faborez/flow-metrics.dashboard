@@ -1416,22 +1416,27 @@ def display_welcome_message():
 def _apply_date_filter(df: pd.DataFrame, date_col_name: str, date_range: str, custom_start_date, custom_end_date) -> pd.DataFrame:
     if date_range == "All time" or pd.to_datetime(df[date_col_name], errors='coerce').isna().all(): return df
     today = pd.to_datetime(datetime.now().date())
-    if date_range == "Last 30 days": cutoff = today - pd.DateOffset(days=30)
-    elif date_range == "Last 60 days": cutoff = today - pd.DateOffset(days=60)
-    elif date_range == "Last 90 days": cutoff = today - pd.DateOffset(days=90)
-    elif date_range == "Custom" and custom_start_date and custom_end_date:
-        start, end = pd.to_datetime(custom_start_date), pd.to_datetime(custom_end_date)
-        return df[(df[date_col_name] >= start) & (df[date_col_name] <= end)]
-    else: return df
-    return df[(df[date_col_name] >= cutoff) & (df[date_col_name] <= today)]
+    
+    start_date = None
+    end_date = today
 
-def format_multiselect_display(selection, name: str) -> str:
-    if not selection or (isinstance(selection, list) and "All" in selection): return f"All {name}"
-    if isinstance(selection, list):
-        if len(selection) == 1: return selection[0]
-        if len(selection) <= 3: return " & ".join(selection)
-        return f"{', '.join(selection[:2])} & {len(selection)-2} more"
-    return str(selection)
+    if date_range == "Last 30 days":
+        start_date = today - pd.DateOffset(days=30)
+    elif date_range == "Last 60 days":
+        start_date = today - pd.DateOffset(days=60)
+    elif date_range == "Last 90 days":
+        start_date = today - pd.DateOffset(days=90)
+    elif date_range == "Custom" and custom_start_date and custom_end_date:
+        start_date = pd.to_datetime(custom_start_date)
+        end_date = pd.to_datetime(custom_end_date)
+    else:
+        return df
+
+    # Normalize start to beginning of day and end to end of day for accurate filtering
+    start_date = start_date.normalize()
+    end_date = end_date.normalize() + pd.Timedelta(days=1, nanoseconds=-1)
+    
+    return df[(df[date_col_name] >= start_date) & (df[date_col_name] <= end_date)]
 
 def main():
     """Main function to run the Streamlit app."""
