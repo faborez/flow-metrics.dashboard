@@ -344,6 +344,32 @@ class ChartGenerator:
         fig.update_traces(texttemplate='%{text:.0f}d', textposition='outside', textfont_size=14)
         fig.update_layout(yaxis_title="Average Time (Days)", font=dict(size=14), height=600, yaxis_range=[0, chart_df['Average Time (Days)'].max() * 1.15])
         return fig, chart_df
+        
+    @staticmethod
+    @st.cache_data
+    def create_85th_time_in_status_chart(df: DataFrame, status_cols: List[str]) -> Tuple[Optional[Figure], Optional[DataFrame]]:
+        if len(status_cols) < 2 or df.empty: return None, None
+        all_durations = []
+        for i in range(len(status_cols) - 1):
+            current_col, next_col = status_cols[i], status_cols[i+1]
+            temp_df = df[[current_col, next_col]].copy()
+            temp_df['current_date'] = temp_df[current_col].apply(DataProcessor._extract_latest_date)
+            temp_df['next_date'] = temp_df[next_col].apply(DataProcessor._extract_latest_date)
+            temp_df.dropna(subset=['current_date', 'next_date'], inplace=True)
+            if temp_df.empty: continue
+            temp_df['duration'] = (temp_df['next_date'] - temp_df['current_date']).dt.days
+            valid_durations = temp_df[temp_df['duration'] >= 0]
+            if not valid_durations.empty:
+                # Calculate the 85th percentile instead of the average
+                p85_duration = np.ceil(valid_durations['duration'].quantile(0.85))
+                all_durations.append({'Status': current_col.replace("'->", "").strip(), '85th Percentile Time (Days)': p85_duration})
+        
+        if not all_durations: return None, None
+        chart_df = pd.DataFrame(all_durations)
+        fig = px.bar(chart_df, x='Status', y='85th Percentile Time (Days)', title='85th Percentile Time in Each Status', text='85th Percentile Time (Days)')
+        fig.update_traces(texttemplate='%{text:.0f}d', textposition='outside', textfont_size=14)
+        fig.update_layout(yaxis_title="85th Percentile Time (Days)", font=dict(size=14), height=600, yaxis_range=[0, chart_df['85th Percentile Time (Days)'].max() * 1.15])
+        return fig, chart_df
 
     @staticmethod
     @st.cache_data
@@ -901,7 +927,7 @@ class Dashboard:
             start_index = all_statuses_ordered.index(start_status)
             end_index = all_statuses_ordered.index(end_status)
             if start_index < end_index:
-                selectable_wait_statuses = all_statuses_ordered[start_index + 1 : end_index]
+                selectable_wait_statuses = [s for s in all_statuses_ordered[start_index : end_index] if s != start_status]
         except (ValueError, TypeError):
             pass
 
@@ -939,12 +965,25 @@ class Dashboard:
                     - This chart shows the average time spent in each status for *all* items, including those that got stuck (the "unhappy path").
                     - If a wait status here shows a much higher average than the "Average Wait Time" above, it indicates a hidden bottleneck where items are getting stuck and not completing the process.
                 """)
+                
+                avg_tab, p85_tab = st.tabs(["Average Time", "85th Percentile Time"])
                 status_cols = list(self.status_mapping.values())
-                time_in_status_chart, _ = ChartGenerator.create_time_in_status_chart(self.filtered_df, status_cols)
-                if time_in_status_chart:
-                    st.plotly_chart(time_in_status_chart, use_container_width=True)
-                else:
-                    st.warning("Not enough data to display the Time in Status chart.")
+
+                with avg_tab:
+                    st.markdown("This chart shows the **average** time items spend in each status.")
+                    time_in_status_chart, _ = ChartGenerator.create_time_in_status_chart(self.filtered_df, status_cols)
+                    if time_in_status_chart:
+                        st.plotly_chart(time_in_status_chart, use_container_width=True)
+                    else:
+                        st.warning("Not enough data to display the Average Time in Status chart.")
+                
+                with p85_tab:
+                    st.markdown("This chart shows the **85th percentile** time spent in each status. This means 85% of items moved to the next status within this time.")
+                    p85_chart, _ = ChartGenerator.create_85th_time_in_status_chart(self.filtered_df, status_cols)
+                    if p85_chart:
+                        st.plotly_chart(p85_chart, use_container_width=True)
+                    else:
+                        st.warning("Not enough data to display the 85th Percentile Time in Status chart.")
         else: 
             st.warning("⚠️ Could not calculate Flow Efficiency. Check selections and ensure there are completed items.")
 
@@ -1084,20 +1123,31 @@ class Dashboard:
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("No completed items in the selected date range could be found to display on this chart.")
         with ct_tabs[4]:
-            st.markdown("This chart shows the average time items spend in each status column of your raw data export.")
+            avg_tab, p85_tab = st.tabs(["Average Time", "85th Percentile Time"])
             status_cols = list(self.status_mapping.values())
-            chart, chart_data = ChartGenerator.create_time_in_status_chart(self.filtered_df, status_cols)
-            if chart:
-                st.plotly_chart(chart, use_container_width=True)
-                if chart_data is not None and not chart_data.empty:
-                    st.divider()
-                    num_statuses = len(chart_data)
-                    cols = st.columns(min(num_statuses, 5), gap="small")
-                    for i, row in chart_data.iterrows():
-                        col = cols[i % 5]
-                        col.metric(label=row['Status'], value=f"{int(row['Average Time (Days)'])} days")
-            else:
-                st.warning("Not enough data was found for the selected statuses to calculate the average time spent in each.")
+
+            with avg_tab:
+                st.markdown("This chart shows the **average** time items spend in each status column of your raw data export.")
+                chart, chart_data = ChartGenerator.create_time_in_status_chart(self.filtered_df, status_cols)
+                if chart:
+                    st.plotly_chart(chart, use_container_width=True)
+                    if chart_data is not None and not chart_data.empty:
+                        st.divider()
+                        num_statuses = len(chart_data)
+                        cols = st.columns(min(num_statuses, 5), gap="small")
+                        for i, row in chart_data.iterrows():
+                            col = cols[i % 5]
+                            col.metric(label=row['Status'], value=f"{int(row['Average Time (Days)'])} days")
+                else:
+                    st.warning("Not enough data was found for the selected statuses to calculate the average time spent in each.")
+            
+            with p85_tab:
+                st.markdown("This chart shows the **85th percentile** time spent in each status. This means 85% of items moved to the next status within this time.")
+                p85_chart, _ = ChartGenerator.create_85th_time_in_status_chart(self.filtered_df, status_cols)
+                if p85_chart:
+                    st.plotly_chart(p85_chart, use_container_width=True)
+                else:
+                    st.warning("Not enough data to display the 85th Percentile Time in Status chart.")
 
     def _display_story_point_chart(self):
         """Displays the Story Point Correlation chart and its controls."""
