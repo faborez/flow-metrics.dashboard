@@ -788,8 +788,20 @@ class Dashboard:
         self.selections["custom_start_date"], self.selections["custom_end_date"] = None, None
         if self.selections["date_range"] == "Custom":
             min_val, max_val = (date_bounds_df.iloc[0]['Start date'], date_bounds_df.iloc[0]['Completed date'])
-            self.selections["custom_start_date"] = st.sidebar.date_input("Start date", value=min_val if pd.notna(min_val) else datetime.now().date(), min_value=min_val, max_value=max_val)
-            self.selections["custom_end_date"] = st.sidebar.date_input("End date", value=max_val if pd.notna(max_val) else datetime.now().date(), min_value=min_val, max_value=max_val)
+            self.selections["custom_start_date"] = st.sidebar.date_input(
+                "Start date", 
+                value=min_val if pd.notna(min_val) else datetime.now().date(), 
+                min_value=min_val, 
+                max_value=max_val,
+                format="DD/MM/YYYY" # FIX: Set display format
+            )
+            self.selections["custom_end_date"] = st.sidebar.date_input(
+                "End date", 
+                value=max_val if pd.notna(max_val) else datetime.now().date(), 
+                min_value=min_val, 
+                max_value=max_val,
+                format="DD/MM/YYYY" # FIX: Set display format
+            )
         self.selections["exclude_long_cycle_times"] = st.sidebar.checkbox("Exclude cycle time > 365 days", value=False)
         self.selections['color_blind_mode'] = st.sidebar.checkbox("Enable Color-Blind Friendly Mode")
 
