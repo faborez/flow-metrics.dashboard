@@ -1129,9 +1129,16 @@ class Dashboard:
 
             with p85_tab:
                 st.markdown("This chart shows the **85th percentile** time spent in each status. This means 85% of items moved to the next status within this time.")
-                p85_chart, _ = ChartGenerator.create_85th_time_in_status_chart(self.filtered_df, status_cols)
+                p85_chart, p85_data = ChartGenerator.create_85th_time_in_status_chart(self.filtered_df, status_cols)
                 if p85_chart:
                     st.plotly_chart(p85_chart, use_container_width=True)
+                    if p85_data is not None and not p85_data.empty:
+                        st.divider()
+                        num_statuses = len(p85_data)
+                        cols = st.columns(min(num_statuses, 5), gap="small")
+                        for i, row in p85_data.iterrows():
+                            col = cols[i % 5]
+                            col.metric(label=row['Status'], value=f"{int(row['85th Percentile Time (Days)'])} days")
                 else:
                     st.warning("Not enough data to display the 85th Percentile Time in Status chart.")
 
