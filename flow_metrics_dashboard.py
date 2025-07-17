@@ -966,8 +966,17 @@ class Dashboard:
                     - If a wait status here shows a much higher average than the "Average Wait Time" above, it indicates a hidden bottleneck where items are getting stuck and not completing the process.
                 """)
                 
-                avg_tab, p85_tab = st.tabs(["Average Time", "85th Percentile Time"])
+                # FIX: Reordered tabs to show 85th percentile first
+                p85_tab, avg_tab = st.tabs(["85th Percentile Time", "Average Time"])
                 status_cols = list(self.status_mapping.values())
+
+                with p85_tab:
+                    st.markdown("This chart shows the **85th percentile** time spent in each status. This means 85% of items moved to the next status within this time.")
+                    p85_chart, _ = ChartGenerator.create_85th_time_in_status_chart(self.filtered_df, status_cols)
+                    if p85_chart:
+                        st.plotly_chart(p85_chart, use_container_width=True)
+                    else:
+                        st.warning("Not enough data to display the 85th Percentile Time in Status chart.")
 
                 with avg_tab:
                     st.markdown("This chart shows the **average** time items spend in each status.")
@@ -976,14 +985,6 @@ class Dashboard:
                         st.plotly_chart(time_in_status_chart, use_container_width=True)
                     else:
                         st.warning("Not enough data to display the Average Time in Status chart.")
-                
-                with p85_tab:
-                    st.markdown("This chart shows the **85th percentile** time spent in each status. This means 85% of items moved to the next status within this time.")
-                    p85_chart, _ = ChartGenerator.create_85th_time_in_status_chart(self.filtered_df, status_cols)
-                    if p85_chart:
-                        st.plotly_chart(p85_chart, use_container_width=True)
-                    else:
-                        st.warning("Not enough data to display the 85th Percentile Time in Status chart.")
         else: 
             st.warning("⚠️ Could not calculate Flow Efficiency. Check selections and ensure there are completed items.")
 
@@ -1123,8 +1124,16 @@ class Dashboard:
             if chart: st.plotly_chart(chart, use_container_width=True)
             else: st.warning("No completed items in the selected date range could be found to display on this chart.")
         with ct_tabs[4]:
-            avg_tab, p85_tab = st.tabs(["Average Time", "85th Percentile Time"])
+            p85_tab, avg_tab = st.tabs(["85th Percentile Time", "Average Time"])
             status_cols = list(self.status_mapping.values())
+
+            with p85_tab:
+                st.markdown("This chart shows the **85th percentile** time spent in each status. This means 85% of items moved to the next status within this time.")
+                p85_chart, _ = ChartGenerator.create_85th_time_in_status_chart(self.filtered_df, status_cols)
+                if p85_chart:
+                    st.plotly_chart(p85_chart, use_container_width=True)
+                else:
+                    st.warning("Not enough data to display the 85th Percentile Time in Status chart.")
 
             with avg_tab:
                 st.markdown("This chart shows the **average** time items spend in each status column of your raw data export.")
@@ -1140,14 +1149,6 @@ class Dashboard:
                             col.metric(label=row['Status'], value=f"{int(row['Average Time (Days)'])} days")
                 else:
                     st.warning("Not enough data was found for the selected statuses to calculate the average time spent in each.")
-            
-            with p85_tab:
-                st.markdown("This chart shows the **85th percentile** time spent in each status. This means 85% of items moved to the next status within this time.")
-                p85_chart, _ = ChartGenerator.create_85th_time_in_status_chart(self.filtered_df, status_cols)
-                if p85_chart:
-                    st.plotly_chart(p85_chart, use_container_width=True)
-                else:
-                    st.warning("Not enough data to display the 85th Percentile Time in Status chart.")
 
     def _display_story_point_chart(self):
         """Displays the Story Point Correlation chart and its controls."""
