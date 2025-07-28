@@ -228,46 +228,32 @@ class DataProcessor:
 
     @staticmethod
     @st.cache_data
-    def calculate_flow_efficiency(df: DataFrame, wait_statuses: List[str], all_status_cols: List[str]) -> DataFrame:
-        if 'Cycle time' not in df.columns or df.empty:
-            return df.assign(**{'Active Time Days': 0, 'Wait Time Days': 0, 'Flow Efficiency': 0})
+    def calculate_flow_efficiency(df: DataFrame, all_statuses_in_cycle: List[str], wait_statuses: List[str]) -> DataFrame:
+        df_eff = df.copy()
+
+        # Parse all relevant elapsed time columns into days
+        for status in all_statuses_in_cycle:
+            if status in df_eff.columns:
+                df_eff[f"{status}_days"] = df_eff[status].apply(DataProcessor._parse_elapsed_time_to_days)
+
+        # Define which columns are active vs. wait based on user selection
+        active_statuses = [s for s in all_statuses_in_cycle if s not in wait_statuses]
+        active_cols_days = [f"{s}_days" for s in active_statuses if f"{s}_days" in df_eff.columns]
+        wait_cols_days = [f"{s}_days" for s in wait_statuses if f"{s}_days" in df_eff.columns]
         
-        df_eff = df.dropna(subset=['Cycle time', 'Start date', 'Completed date']).copy()
-        wait_time_days_list = []
-
-        for _, row in df_eff.iterrows():
-            total_wait_time = timedelta(0)
-            timestamps = []
-            for col in all_status_cols:
-                ts = DataProcessor._extract_latest_date(row[col])
-                if pd.notna(ts):
-                    timestamps.append((ts, col.replace("'->", "").strip()))
-
-            if len(timestamps) < 2:
-                wait_time_days_list.append(0)
-                continue
-
-            timestamps.sort()
-            
-            # Only consider transitions within the item's cycle time
-            cycle_timestamps = [t for t in timestamps if row['Start date'] <= t[0] <= row['Completed date']]
-
-            for i in range(len(cycle_timestamps) - 1):
-                start_time, status_name = cycle_timestamps[i]
-                end_time, _ = cycle_timestamps[i+1]
-                if status_name in wait_statuses:
-                    duration = end_time - start_time
-                    if duration.total_seconds() > 0:
-                        total_wait_time += duration
-            
-            wait_time_days_list.append(total_wait_time.total_seconds() / (24 * 3600))
-
-        df_eff['Wait Time Days'] = wait_time_days_list
-        df_eff['Active Time Days'] = df_eff['Cycle time'] - df_eff['Wait Time Days']
-        df_eff['Flow Efficiency'] = (df_eff['Active Time Days'] / df_eff['Cycle time']) * 100
+        # Sum the columns to get Active Time and Wait Time
+        df_eff['Active Time Days'] = df_eff[active_cols_days].sum(axis=1)
+        df_eff['Wait Time Days'] = df_eff[wait_cols_days].sum(axis=1)
+        # Calculate Cycle Time as the sum of all time spent in the defined workflow
+        df_eff['Cycle time'] = df_eff['Active Time Days'] + df_eff['Wait Time Days']
+        
+        # Calculate Flow Efficiency, handling division by zero
+        df_eff['Flow Efficiency'] = 0.0
+        mask = df_eff['Cycle time'] > 0
+        df_eff.loc[mask, 'Flow Efficiency'] = (df_eff.loc[mask, 'Active Time Days'] / df_eff.loc[mask, 'Cycle time']) * 100
         df_eff['Flow Efficiency'] = df_eff['Flow Efficiency'].clip(0, 100)
         
-        return df.merge(df_eff[['Key', 'Active Time Days', 'Wait Time Days', 'Flow Efficiency']], on='Key', how='left').fillna({'Flow Efficiency': 0, 'Active Time Days': 0, 'Wait Time Days': 0})
+        return df_eff
 
 class ChartGenerator:
     """Generates Plotly charts for the dashboard."""
@@ -956,24 +942,28 @@ class Dashboard:
         start_status, end_status = self.selections.get('start_status'), self.selections.get('completed_status')
         st.info(f"**Calculation based on:**\n- **Cycle Time from:** `{start_status}` to `{end_status}` (set on the Cycle Time tab).\n- **Wait/Queue Statuses:** Please select the statuses below that represent idle/waiting time.")
 
+        # Determine the list of statuses that are within the selected cycle time
         all_statuses_ordered = list(self.status_mapping.keys())
-        selectable_wait_statuses = []
+        all_statuses_in_cycle = []
         try:
             start_index = all_statuses_ordered.index(start_status)
             end_index = all_statuses_ordered.index(end_status)
             if start_index < end_index:
-                selectable_wait_statuses = [s for s in all_statuses_ordered[start_index : end_index] if s != start_status]
+                # Get all statuses between start and end (inclusive of start, exclusive of end)
+                all_statuses_in_cycle = all_statuses_ordered[start_index:end_index]
         except (ValueError, TypeError):
             pass
 
-        default_wait = [s for s in selectable_wait_statuses if s.lower() in ['to do', 'ready for dev', 'ready for test']]
-        wait_statuses = st.multiselect("Select Wait/Queue Statuses", selectable_wait_statuses, default=default_wait, help="Select statuses that represent idle/waiting time.")
+        # Allow user to select wait statuses from the cycle time scope
+        default_wait = [s for s in all_statuses_in_cycle if s.lower() in ['to do', 'ready for dev', 'ready for test']]
+        wait_statuses = st.multiselect("Select Wait/Queue Statuses", all_statuses_in_cycle, default=default_wait, help="Select statuses that represent idle/waiting time.")
         
         if not wait_statuses:
             st.warning("Please select one or more 'Wait/Queue' statuses to calculate Flow Efficiency.")
             return
 
-        efficiency_df = DataProcessor.calculate_flow_efficiency(self.filtered_df, wait_statuses, list(self.status_mapping.values()))
+        # Call the new calculation method
+        efficiency_df = DataProcessor.calculate_flow_efficiency(self.filtered_df, all_statuses_in_cycle, wait_statuses)
         
         if efficiency_df.empty or efficiency_df['Cycle time'].isnull().all():
             st.warning("No data available to calculate Flow Efficiency with the current filters.")
@@ -1001,7 +991,6 @@ class Dashboard:
                     - If a wait status here shows a much higher average than the "Average Wait Time" above, it indicates a hidden bottleneck where items are getting stuck and not completing the process.
                 """)
                 
-                # FIX: Reordered tabs to show 85th percentile first
                 p85_tab, avg_tab = st.tabs(["85th Percentile Time", "Average Time"])
                 status_cols = list(self.status_mapping.values())
 
@@ -1010,9 +999,6 @@ class Dashboard:
                     p85_chart, _ = ChartGenerator.create_85th_time_in_status_chart(self.filtered_df, status_cols)
                     if p85_chart:
                         st.plotly_chart(p85_chart, use_container_width=True)
-                    else:
-                        st.warning("Not enough data to display the 85th Percentile Time in Status chart.")
-
                 with avg_tab:
                     st.markdown("This chart shows the **average** time items spend in each status.")
                     time_in_status_chart, _ = ChartGenerator.create_time_in_status_chart(self.filtered_df, status_cols)
