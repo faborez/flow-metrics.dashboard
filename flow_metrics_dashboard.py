@@ -194,6 +194,37 @@ class DataProcessor:
             st.warning(f"Data Quality Warning: {invalid_cycle.sum()} item(s) excluded due to zero or negative cycle time.")
             df = df[~invalid_cycle]
         return df
+        
+    @staticmethod
+    def _parse_elapsed_time_to_days(time_val: any) -> float:
+        """Parses an elapsed time string (e.g., '3 days, 8 hours') or number into a total number of days."""
+        if pd.isna(time_val):
+            return np.nan
+        
+        if isinstance(time_val, (int, float)):
+            return float(time_val)
+
+        time_str = str(time_val).strip()
+        if not time_str:
+            return np.nan
+
+        # If the value is a simple number, assume it's days
+        if time_str.replace('.', '', 1).isdigit():
+             return float(time_str)
+        
+        days = 0.0
+        # Regex to find numbers and their units (d for day, h for hour, m for minute)
+        parts = re.findall(r'(\d+\.?\d*)\s*(d|h|m)', time_str, re.IGNORECASE)
+        
+        for value, unit in parts:
+            value = float(value)
+            if unit.lower() == 'd':
+                days += value
+            elif unit.lower() == 'h':
+                days += value / 24.0
+            elif unit.lower() == 'm':
+                days += value / (24.0 * 60.0)
+        return days if days > 0 else np.nan
 
     @staticmethod
     @st.cache_data
@@ -324,22 +355,25 @@ class ChartGenerator:
     @staticmethod
     @st.cache_data
     def create_time_in_status_chart(df: DataFrame, status_cols: List[str]) -> Tuple[Optional[Figure], Optional[DataFrame]]:
-        if len(status_cols) < 2 or df.empty: return None, None
+        # Get the clean status names from the -> prefixed columns
+        clean_status_names = [s.replace("'->", "").strip() for s in status_cols]
+        
         all_durations = []
-        for i in range(len(status_cols) - 1):
-            current_col, next_col = status_cols[i], status_cols[i+1]
-            temp_df = df[[current_col, next_col]].copy()
-            temp_df['current_date'] = temp_df[current_col].apply(DataProcessor._extract_latest_date)
-            temp_df['next_date'] = temp_df[next_col].apply(DataProcessor._extract_latest_date)
-            temp_df.dropna(subset=['current_date', 'next_date'], inplace=True)
-            if temp_df.empty: continue
-            temp_df['duration'] = (temp_df['next_date'] - temp_df['current_date']).dt.days
-            valid_durations = temp_df[temp_df['duration'] >= 0]
-            if not valid_durations.empty:
-                avg_duration = np.ceil(valid_durations['duration'].mean())
-                all_durations.append({'Status': current_col.replace("'->", "").strip(), 'Average Time (Days)': avg_duration})
+        # Loop through all statuses EXCEPT the last one
+        for status_name in clean_status_names[:-1]:
+            # Check if a corresponding non-prefixed elapsed time column exists
+            if status_name in df.columns:
+                durations = df[status_name].apply(DataProcessor._parse_elapsed_time_to_days).dropna()
+                if not durations.empty:
+                    avg_duration = durations.mean()
+                    all_durations.append({'Status': status_name, 'Average Time (Days)': avg_duration})
+
         if not all_durations: return None, None
+        
         chart_df = pd.DataFrame(all_durations)
+        # Round the values for display
+        chart_df['Average Time (Days)'] = np.ceil(chart_df['Average Time (Days)'])
+        
         fig = px.bar(chart_df, x='Status', y='Average Time (Days)', title='Average Time in Each Status', text='Average Time (Days)')
         fig.update_traces(texttemplate='%{text:.0f}d', textposition='outside', textfont_size=14)
         fig.update_layout(yaxis_title="Average Time (Days)", font=dict(size=14), height=600, yaxis_range=[0, chart_df['Average Time (Days)'].max() * 1.15])
@@ -348,24 +382,25 @@ class ChartGenerator:
     @staticmethod
     @st.cache_data
     def create_85th_time_in_status_chart(df: DataFrame, status_cols: List[str]) -> Tuple[Optional[Figure], Optional[DataFrame]]:
-        if len(status_cols) < 2 or df.empty: return None, None
+        # Get the clean status names from the -> prefixed columns
+        clean_status_names = [s.replace("'->", "").strip() for s in status_cols]
+        
         all_durations = []
-        for i in range(len(status_cols) - 1):
-            current_col, next_col = status_cols[i], status_cols[i+1]
-            temp_df = df[[current_col, next_col]].copy()
-            temp_df['current_date'] = temp_df[current_col].apply(DataProcessor._extract_latest_date)
-            temp_df['next_date'] = temp_df[next_col].apply(DataProcessor._extract_latest_date)
-            temp_df.dropna(subset=['current_date', 'next_date'], inplace=True)
-            if temp_df.empty: continue
-            temp_df['duration'] = (temp_df['next_date'] - temp_df['current_date']).dt.days
-            valid_durations = temp_df[temp_df['duration'] >= 0]
-            if not valid_durations.empty:
-                # Calculate the 85th percentile instead of the average
-                p85_duration = np.ceil(valid_durations['duration'].quantile(0.85))
-                all_durations.append({'Status': current_col.replace("'->", "").strip(), '85th Percentile Time (Days)': p85_duration})
+        # Loop through all statuses EXCEPT the last one
+        for status_name in clean_status_names[:-1]:
+            # Check if a corresponding non-prefixed elapsed time column exists
+            if status_name in df.columns:
+                durations = df[status_name].apply(DataProcessor._parse_elapsed_time_to_days).dropna()
+                if not durations.empty:
+                    p85_duration = durations.quantile(0.85)
+                    all_durations.append({'Status': status_name, '85th Percentile Time (Days)': p85_duration})
         
         if not all_durations: return None, None
+
         chart_df = pd.DataFrame(all_durations)
+        # Round the values for display
+        chart_df['85th Percentile Time (Days)'] = np.ceil(chart_df['85th Percentile Time (Days)'])
+        
         fig = px.bar(chart_df, x='Status', y='85th Percentile Time (Days)', title='85th Percentile Time in Each Status', text='85th Percentile Time (Days)')
         fig.update_traces(texttemplate='%{text:.0f}d', textposition='outside', textfont_size=14)
         fig.update_layout(yaxis_title="85th Percentile Time (Days)", font=dict(size=14), height=600, yaxis_range=[0, chart_df['85th Percentile Time (Days)'].max() * 1.15])
