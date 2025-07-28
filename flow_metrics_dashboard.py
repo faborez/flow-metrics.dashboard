@@ -281,7 +281,10 @@ class ChartGenerator:
         plot_df['Status'] = pd.Categorical(plot_df['Status'], categories=selected_statuses, ordered=True)
         color_map = ColorManager.get_work_type_colors(is_color_blind_mode) if is_color_blind_mode else None
         fig = px.area(plot_df, x='Date', y='Count', color='Status', title='Cumulative Flow Diagram', labels={'Date': 'Date', 'Count': 'Cumulative Count of Items'}, category_orders={'Status': selected_statuses}, color_discrete_map=color_map)
-        fig.update_layout(height=600, legend_title='Workflow Stage')
+        
+        # FIX: Reverse the order of the legend items
+        fig.update_layout(height=600, legend_title='Workflow Stage', legend_traceorder='reversed')
+        
         return fig
 
     @staticmethod
@@ -930,7 +933,6 @@ class Dashboard:
                     - **Active states** are any stage where someone is actively working on the item (e.g., 'In Progress', 'In Review', 'In Testing').
                     - **Wait states** (or Queues) are any stage where an item is idle and waiting for the next step (e.g., 'To Do', 'Ready for Dev', 'Ready for Test').
                 - **Why it matters?** This chart helps you determine if your cycle times are long because of the work itself or because items are spending too much time sitting idle in waiting queues.
-                - **Sanity Check:** A high flow efficiency score can be misleading. It only measures the efficiency of items that have *completed* the full cycle. If many items are getting stuck in a wait state and never finishing, they won't be included in this calculation. Always compare the "Average Wait Time" metric with the "Where is the time going?" chart below. A large difference between these two indicates a hidden bottleneck.
                 - **Formula:** `Flow Efficiency = (Total Active Time / Total Cycle Time) * 100`
             """)
         st.markdown('</div>', unsafe_allow_html=True)
@@ -940,21 +942,22 @@ class Dashboard:
             return
 
         start_status, end_status = self.selections.get('start_status'), self.selections.get('completed_status')
-        st.info(f"**Calculation based on:**\n- **Cycle Time from:** `{start_status}` to `{end_status}` (set on the Cycle Time tab).\n- **Wait/Queue Statuses:** Please select the statuses below that represent idle/waiting time.")
+        st.info(f"""
+        - **Calculation based on:** Cycle Time from `{start_status}` to `{end_status}` (set on the Cycle Time tab).
+        - **Wait/Queue Statuses:** Please select the statuses below that represent idle/waiting time.
+        - **Note:** To provide a more holistic view of process health, this Flow Efficiency calculation includes **all work items**, both completed and in-progress. The 'Cycle Time' metric on this page may differ from the scatter plot, as it is derived from the sum of time spent in each status for this wider set of items.
+        """)
 
-        # Determine the list of statuses that are within the selected cycle time
         all_statuses_ordered = list(self.status_mapping.keys())
         all_statuses_in_cycle = []
         try:
             start_index = all_statuses_ordered.index(start_status)
             end_index = all_statuses_ordered.index(end_status)
             if start_index < end_index:
-                # Get all statuses between start and end (inclusive of start, exclusive of end)
                 all_statuses_in_cycle = all_statuses_ordered[start_index:end_index]
         except (ValueError, TypeError):
             pass
 
-        # Allow user to select wait statuses from the cycle time scope
         default_wait = [s for s in all_statuses_in_cycle if s.lower() in ['to do', 'ready for dev', 'ready for test']]
         wait_statuses = st.multiselect("Select Wait/Queue Statuses", all_statuses_in_cycle, default=default_wait, help="Select statuses that represent idle/waiting time.")
         
@@ -962,44 +965,65 @@ class Dashboard:
             st.warning("Please select one or more 'Wait/Queue' statuses to calculate Flow Efficiency.")
             return
 
-        # Call the new calculation method
         efficiency_df = DataProcessor.calculate_flow_efficiency(self.filtered_df, all_statuses_in_cycle, wait_statuses)
         
-        if efficiency_df.empty or efficiency_df['Cycle time'].isnull().all():
+        if efficiency_df.empty or efficiency_df['Cycle time'].isnull().all() or (efficiency_df['Cycle time'] <= 0).all():
             st.warning("No data available to calculate Flow Efficiency with the current filters.")
             return
 
-        avg_cycle_time = efficiency_df['Cycle time'].mean()
-        avg_wait_time = efficiency_df['Wait Time Days'].mean()
-        avg_active_time = avg_cycle_time - avg_wait_time
-        avg_efficiency = (avg_active_time / avg_cycle_time) * 100 if avg_cycle_time > 0 else 0
+        p85_tab, avg_tab = st.tabs(["85th Percentile", "Average"])
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Average Active Time", f"{avg_active_time:.2f} Days", help="Average Cycle Time - Average Wait Time")
-        c2.metric("Average Wait Time", f"{avg_wait_time:.2f} Days", help="The average time items spent in the selected wait statuses.")
-        c3.metric("Average Cycle Time", f"{avg_cycle_time:.2f} Days", help="The average total time from the selected start to end status. Calculated as Average Active Time + Average Wait Time.")
-        c4.metric("Overall Average Flow Efficiency", f"{avg_efficiency:.1f}%", help="Calculated as (Average Active Time / Average Cycle Time) * 100")
+        with p85_tab:
+            st.markdown("This view shows the **85th percentile** values. This means 85% of your work items experienced this value or less.")
+            
+            p85_cycle_time = efficiency_df['Cycle time'].quantile(0.85)
+            p85_wait_time = efficiency_df['Wait Time Days'].quantile(0.85)
+            
+            p85_active_time = p85_cycle_time - p85_wait_time
+            p85_active_time = max(0, p85_active_time) 
+            p85_efficiency = (p85_active_time / p85_cycle_time) * 100 if p85_cycle_time > 0 else 0
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("85p Active Time", f"{p85_active_time:.2f} Days")
+            c2.metric("85p Wait Time", f"{p85_wait_time:.2f} Days")
+            c3.metric("85p Cycle Time", f"{p85_cycle_time:.2f} Days")
+            c4.metric("85p Flow Efficiency", f"{p85_efficiency:.1f}%")
+
+        with avg_tab:
+            st.markdown("This view shows the **average** (mean) values for your flow data.")
+            avg_cycle_time = efficiency_df['Cycle time'].mean()
+            avg_wait_time = efficiency_df['Wait Time Days'].mean()
+            avg_active_time = efficiency_df['Active Time Days'].mean()
+            # FIX: Calculate efficiency from the other average metrics for consistency
+            avg_efficiency = (avg_active_time / avg_cycle_time) * 100 if avg_cycle_time > 0 else 0
+            
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Average Active Time", f"{avg_active_time:.2f} Days")
+            c2.metric("Average Wait Time", f"{avg_wait_time:.2f} Days")
+            c3.metric("Average Cycle Time", f"{avg_cycle_time:.2f} Days")
+            c4.metric("Average Flow Efficiency", f"{avg_efficiency:.1f}%")
+
+        st.markdown("---")
+        st.subheader("Flow Efficiency Distribution")
+        st.markdown("This chart shows the distribution of Flow Efficiency scores for all items analyzed. The metric tiles above are derived from this data.")
         
         chart = ChartGenerator.create_flow_efficiency_histogram(efficiency_df)
         if chart: 
             st.plotly_chart(chart, use_container_width=True)
             with st.expander("Where is the time going? (Time in Status)", expanded=True):
                 st.markdown("""
-                    **This chart acts as a sanity check for your Flow Efficiency.**
-                    - The **Average Wait Time** metric above is for items that finished the full cycle (the "happy path").
-                    - This chart shows the average time spent in each status for *all* items, including those that got stuck (the "unhappy path").
-                    - If a wait status here shows a much higher average than the "Average Wait Time" above, it indicates a hidden bottleneck where items are getting stuck and not completing the process.
+                These charts show how long items spend in each status, helping you identify the biggest delays in your process. Use the tabs to switch between the **85th Percentile** view, to understand outlier scenarios, and the **Average** view for the typical experience.
                 """)
                 
-                p85_tab, avg_tab = st.tabs(["85th Percentile Time", "Average Time"])
+                p85_tab_exp, avg_tab_exp = st.tabs(["85th Percentile Time", "Average Time"])
                 status_cols = list(self.status_mapping.values())
 
-                with p85_tab:
+                with p85_tab_exp:
                     st.markdown("This chart shows the **85th percentile** time spent in each status. This means 85% of items moved to the next status within this time.")
                     p85_chart, _ = ChartGenerator.create_85th_time_in_status_chart(self.filtered_df, status_cols)
                     if p85_chart:
                         st.plotly_chart(p85_chart, use_container_width=True)
-                with avg_tab:
+                with avg_tab_exp:
                     st.markdown("This chart shows the **average** time items spend in each status.")
                     time_in_status_chart, _ = ChartGenerator.create_time_in_status_chart(self.filtered_df, status_cols)
                     if time_in_status_chart:
@@ -1007,7 +1031,7 @@ class Dashboard:
                     else:
                         st.warning("Not enough data to display the Average Time in Status chart.")
         else: 
-            st.warning("⚠️ Could not calculate Flow Efficiency. Check selections and ensure there are completed items.")
+            st.warning("⚠️ Could not generate the Flow Efficiency distribution chart.")
 
     def _display_cfd_chart(self):
         """Displays the Cumulative Flow Diagram and its controls."""
