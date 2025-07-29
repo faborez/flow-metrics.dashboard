@@ -13,6 +13,13 @@ import base64
 import os
 import unicodedata
 
+def clean_value(value: any) -> str:
+    """Removes common Jira suffixes like -DPID or -1234 from a string value."""
+    if not isinstance(value, str):
+        return str(value)
+    # This regex removes a hyphen followed by uppercase letters and/or digits at the end of the string.
+    return re.sub(r'-[A-Z0-9]+$', '', value.strip()).strip()
+
 # Configuration
 st.set_page_config(page_title="Flow Metrics Dashboard", layout="wide")
 
@@ -81,24 +88,14 @@ class ChartConfig:
 class StatusManager:
     """Handles status column extraction and validation."""
     @staticmethod
+    @staticmethod
     def extract_status_columns(df: DataFrame) -> Dict[str, str]:
-        
-        def clean_status_name(status_name):
-            """Removes known suffixes from a status name for comparison."""
-            name = str(status_name).strip()
-            name = name.replace("'->", "").strip()
-            name = re.sub(r'-\d+$', '', name)
-            name = re.sub(r'-DPID$', '', name)
-            return name.strip()
-
-        status_col_map = {col.replace("'->", "").strip(): col for col in df.columns if col.startswith("'->")}
-        
-        cleaned_status_col_map = {}
-        for status_name, raw_col in status_col_map.items():
-            cleaned_name = clean_status_name(status_name)
-            cleaned_status_col_map[cleaned_name] = raw_col
-            
-        return cleaned_status_col_map
+        # This simpler version uses the original, suffixed names as the keys, which is more robust.
+        status_col_map = {
+            col.replace("'->", "").strip(): col
+            for col in df.columns if col.startswith("'->")
+        }
+        return status_col_map
 
     @staticmethod
     def validate_status_order(df: DataFrame, start_col: Optional[str], completed_col: Optional[str]) -> Tuple[bool, str]:
@@ -142,8 +139,24 @@ class DataProcessor:
             duplicates = df_clean[df_clean.duplicated(subset=['Key'], keep=False)]
             st.warning(f"Data Quality: Found and removed {len(duplicates.drop_duplicates(subset=['Key']))} duplicate items. The first version of each was kept.")
         df_clean = df_clean.drop_duplicates(subset=['Key'], keep='first').copy()
+        
+        # Normalize characters first to handle any visual duplicates (e.g., different quote types)
+        normalized_cols = [unicodedata.normalize('NFKC', col).strip() if isinstance(col, str) else col for col in df_clean.columns]
+        # Then, clean the suffixes
+        cleaned_cols = [clean_value(col) for col in normalized_cols]
+        
+        if len(cleaned_cols) != len(set(cleaned_cols)):
+            st.error("File Error: Your CSV file has columns that become duplicates after removing suffixes (e.g., 'Labels-A' and 'Labels-B' both become 'Labels'). Please rename the columns in your source file to be unique before uploading.")
+            return pd.DataFrame() 
+            
+        df_clean.columns = cleaned_cols
+
         for col in ['Key', 'Work type', 'Status']:
             if col in df_clean.columns: df_clean[col] = df_clean[col].apply(lambda x: unicodedata.normalize('NFKC', x).strip() if isinstance(x, str) else x)
+        
+        if 'Status' in df_clean.columns:
+            df_clean['Status'] = df_clean['Status'].apply(clean_value)
+            
         return df_clean
 
     @staticmethod
@@ -231,13 +244,20 @@ class DataProcessor:
     def calculate_flow_efficiency(df: DataFrame, all_statuses_in_cycle: List[str], wait_statuses: List[str]) -> DataFrame:
         df_eff = df.copy()
 
-        # Parse all relevant elapsed time columns into days
-        for status in all_statuses_in_cycle:
-            if status in df_eff.columns:
-                df_eff[f"{status}_days"] = df_eff[status].apply(DataProcessor._parse_elapsed_time_to_days)
+        # This function now expects the raw, suffixed column names
+        # We will clean them here for the calculation
+        
+        # Create a map of {raw_col_name: clean_col_name}
+        col_to_clean_map = {col: clean_value(col) for col in all_statuses_in_cycle}
 
-        # Define which columns are active vs. wait based on user selection
-        active_statuses = [s for s in all_statuses_in_cycle if s not in wait_statuses]
+        # Parse all relevant elapsed time columns into days
+        for col_name in all_statuses_in_cycle:
+            if col_name in df_eff.columns:
+                clean_name = col_to_clean_map[col_name]
+                df_eff[f"{clean_name}_days"] = df_eff[col_name].apply(DataProcessor._parse_elapsed_time_to_days)
+
+        # Define which columns are active vs. wait based on user selection of CLEAN names
+        active_statuses = [clean_value(s) for s in all_statuses_in_cycle if clean_value(s) not in wait_statuses]
         active_cols_days = [f"{s}_days" for s in active_statuses if f"{s}_days" in df_eff.columns]
         wait_cols_days = [f"{s}_days" for s in wait_statuses if f"{s}_days" in df_eff.columns]
         
@@ -282,7 +302,7 @@ class ChartGenerator:
         color_map = ColorManager.get_work_type_colors(is_color_blind_mode) if is_color_blind_mode else None
         fig = px.area(plot_df, x='Date', y='Count', color='Status', title='Cumulative Flow Diagram', labels={'Date': 'Date', 'Count': 'Cumulative Count of Items'}, category_orders={'Status': selected_statuses}, color_discrete_map=color_map)
         
-        # FIX: Reverse the order of the legend items
+        # FIX: Reverse the order of the legend items to match the chart
         fig.update_layout(height=600, legend_title='Workflow Stage', legend_traceorder='reversed')
         
         return fig
@@ -798,9 +818,36 @@ class Dashboard:
         st.markdown('</div>', unsafe_allow_html=True)
 
     def _get_filterable_columns(self) -> List[str]:
-        exclusions = set(Config.FILTER_EXCLUSIONS + list(self.status_mapping.values()) + list(self.status_mapping.keys()))
-        potential_filters = [col for col in self.raw_df.columns if col not in exclusions and col != 'Work type']
-        return sorted([col for col in potential_filters if self.raw_df[col].replace('', np.nan).notna().any()])
+        # Create a set of all status names (cleaned of suffixes) and their raw column names for exclusion.
+        status_names_to_exclude = set(self.status_mapping.keys())
+        raw_status_cols_to_exclude = set(self.status_mapping.values())
+        
+        potential_filters = []
+        for col in self.raw_df.columns:
+            # Rule 1: Skip if it's a hardcoded exclusion like 'Key', 'Summary', etc.
+            if col in Config.FILTER_EXCLUSIONS:
+                continue
+            
+            # Rule 2: Skip if it's the global 'Work type' filter
+            if col == 'Work type':
+                continue
+
+            # Rule 3: Directly check for and skip any column that starts with the '-> prefix.
+            if str(col).startswith("'->"):
+                continue
+            
+            # Rule 4: As a fallback, also check against the cleaned status names to exclude elapsed time columns.
+            cleaned_col = re.sub(r'-\d+$|-DPID$', '', col).strip()
+            if cleaned_col in status_names_to_exclude:
+                continue
+
+            potential_filters.append(col)
+        
+        # From the remaining list, only return columns that actually contain any data.
+        return sorted([
+            col for col in potential_filters
+            if self.raw_df[col].replace('', np.nan).notna().any()
+        ])
 
     def _pre_process_for_sidebar(self) -> DataFrame:
         status_cols = list(self.status_mapping.values())
@@ -812,14 +859,34 @@ class Dashboard:
         return pd.DataFrame({'Start date': [date_df['Date'].min()], 'Completed date': [date_df['Date'].max()]})
         
     def _handle_multiselect(self, key):
+        # This function ensures that "All" and other options are mutually exclusive.
         prev_key = f"prev_{key}"
-        if prev_key not in st.session_state: st.session_state[prev_key] = st.session_state[key]
-        current, previous = st.session_state[key], st.session_state[prev_key]
-        if current == previous: return
-        all_was, all_is = "All" in previous, "All" in current
-        if not all_was and all_is: st.session_state[key] = ["All"]
-        elif all_was and len(current) > 1: st.session_state[key] = [s for s in current if s != "All"]
-        elif not current: st.session_state[key] = ["All"]
+        
+        # Initialize the 'previous' state on the first run
+        if prev_key not in st.session_state:
+            st.session_state[prev_key] = st.session_state[key]
+
+        current_selection = st.session_state[key]
+        previous_selection = st.session_state[prev_key]
+
+        # Exit if there's no change to prevent unnecessary reruns
+        if current_selection == previous_selection:
+            return
+
+        all_was_selected = "All" in previous_selection
+        all_is_now_selected = "All" in current_selection
+
+        # Case 1: If "All" was not selected, and the user just clicked "All"
+        if not all_was_selected and all_is_now_selected:
+            st.session_state[key] = ["All"]
+        # Case 2: If "All" was selected, and the user just clicked another option
+        elif all_was_selected and len(current_selection) > 1:
+            st.session_state[key] = [s for s in current_selection if s != "All"]
+        # Case 3: If the user has deselected all options
+        elif not current_selection:
+            st.session_state[key] = ["All"]
+        
+        # Update the 'previous' state for the next run
         st.session_state[prev_key] = st.session_state[key]
 
     def _display_sidebar(self, date_bounds_df: DataFrame):
@@ -870,16 +937,42 @@ class Dashboard:
             st.sidebar.info("No additional filterable columns found.")
         else:
             if 'dynamic_filters_to_show' not in st.session_state: st.session_state.dynamic_filters_to_show = []
-            st.sidebar.multiselect("Select Additional Filters", self.filterable_columns, key='dynamic_filters_to_show', help="Choose columns from your file to use as filters.")
+            
+            # Clean the list of available filters for display
+            st.sidebar.multiselect(
+                "Select Additional Filters",
+                self.filterable_columns,
+                key='dynamic_filters_to_show',
+                help="Choose columns from your file to use as filters.",
+                format_func=clean_value
+            )
+            
+            # The session state still holds the original column names, which is correct
             for f_name in st.session_state.dynamic_filters_to_show:
                 f_type = Config.FILTER_TYPE_HINTS.get(f_name, "multi")
                 unique_vals = self._get_unique_values(self.raw_df[f_name], f_type)
                 session_key = f"selection_{f_name}"
+                
+                # Clean the label of the individual filter widget for display
+                display_label = clean_value(f_name)
+
                 if f_type == "single":
-                    self.selections[f_name] = st.sidebar.selectbox(f_name, ["All"] + unique_vals, key=f"filter_{f_name}")
+                    self.selections[f_name] = st.sidebar.selectbox(
+                        display_label,
+                        ["All"] + unique_vals,
+                        key=f"filter_{f_name}",
+                        format_func=clean_value # Clean the values inside the dropdown
+                    )
                 else:
                     if session_key not in st.session_state: st.session_state[session_key] = ['All']
-                    st.sidebar.multiselect(f_name, ["All"] + unique_vals, key=session_key, on_change=self._handle_multiselect, args=(session_key,))
+                    st.sidebar.multiselect(
+                        display_label,
+                        ["All"] + unique_vals,
+                        key=session_key,
+                        on_change=self._handle_multiselect,
+                        args=(session_key,),
+                        format_func=clean_value # Clean the values inside the dropdown
+                    )
                     self.selections[f_name] = st.session_state[session_key]
 
     def _get_unique_values(self, series: pd.Series, filter_type: str) -> List[str]:
@@ -928,22 +1021,18 @@ class Dashboard:
         st.markdown('<div class="guidance-expander">', unsafe_allow_html=True)
         with st.expander("Learn more about this chart", icon="🎓"):
             st.markdown("""
-                - **What it is:** Flow Efficiency is the percentage of time that work items spend in 'active' work states versus 'wait' states. It's a key indicator of waste in your workflow.
-                - **What are Active and Wait states?**
-                    - **Active states** are any stage where someone is actively working on the item (e.g., 'In Progress', 'In Review', 'In Testing').
-                    - **Wait states** (or Queues) are any stage where an item is idle and waiting for the next step (e.g., 'To Do', 'Ready for Dev', 'Ready for Test').
-                - **Why it matters?** This chart helps you determine if your cycle times are long because of the work itself or because items are spending too much time sitting idle in waiting queues.
+                - **What it is:** Flow Efficiency is the percentage of time that work items spend in 'active' work states versus 'wait' states...
                 - **Formula:** `Flow Efficiency = (Total Active Time / Total Cycle Time) * 100`
             """)
         st.markdown('</div>', unsafe_allow_html=True)
         
-        if self.filtered_df is None or self.filtered_df.empty or 'start_status' not in self.selections:
+        start_status, end_status = self.selections.get('start_status'), self.selections.get('completed_status')
+        if not start_status or start_status == "None" or not end_status or end_status == "None":
             st.info("To view this chart, first configure your cycle time statuses on the '📈 Cycle Time' tab.")
             return
 
-        start_status, end_status = self.selections.get('start_status'), self.selections.get('completed_status')
         st.info(f"""
-        - **Calculation based on:** Cycle Time from `{start_status}` to `{end_status}` (set on the Cycle Time tab).
+        - **Calculation based on:** Cycle Time from `{clean_value(start_status)}` to `{clean_value(end_status)}` (set on the Cycle Time tab).
         - **Wait/Queue Statuses:** Please select the statuses below that represent idle/waiting time.
         - **Note:** To provide a more holistic view of process health, this Flow Efficiency calculation includes **all work items**, both completed and in-progress. The 'Cycle Time' metric on this page may differ from the scatter plot, as it is derived from the sum of time spent in each status for this wider set of items.
         """)
@@ -958,14 +1047,22 @@ class Dashboard:
         except (ValueError, TypeError):
             pass
 
-        default_wait = [s for s in all_statuses_in_cycle if s.lower() in ['to do', 'ready for dev', 'ready for test']]
-        wait_statuses = st.multiselect("Select Wait/Queue Statuses", all_statuses_in_cycle, default=default_wait, help="Select statuses that represent idle/waiting time.")
+        default_wait = [s for s in all_statuses_in_cycle if clean_value(s).lower() in ['to do', 'ready for dev', 'ready for test']]
+        wait_statuses = st.multiselect(
+            "Select Wait/Queue Statuses", 
+            all_statuses_in_cycle, 
+            default=default_wait, 
+            help="Select statuses that represent idle/waiting time.",
+            format_func=clean_value
+        )
         
         if not wait_statuses:
             st.warning("Please select one or more 'Wait/Queue' statuses to calculate Flow Efficiency.")
             return
-
-        efficiency_df = DataProcessor.calculate_flow_efficiency(self.filtered_df, all_statuses_in_cycle, wait_statuses)
+        
+        source_df = self._apply_all_filters(self.raw_df, apply_date_filter=False)
+        
+        efficiency_df = DataProcessor.calculate_flow_efficiency(source_df, all_statuses_in_cycle, wait_statuses)
         
         if efficiency_df.empty or efficiency_df['Cycle time'].isnull().all() or (efficiency_df['Cycle time'] <= 0).all():
             st.warning("No data available to calculate Flow Efficiency with the current filters.")
@@ -974,8 +1071,7 @@ class Dashboard:
         p85_tab, avg_tab = st.tabs(["85th Percentile", "Average"])
 
         with p85_tab:
-            st.markdown("This view shows the **85th percentile** values. This means 85% of your work items experienced this value or less.")
-            
+            st.markdown("This view shows the **85th percentile** values...")
             p85_cycle_time = efficiency_df['Cycle time'].quantile(0.85)
             p85_wait_time = efficiency_df['Wait Time Days'].quantile(0.85)
             
@@ -994,7 +1090,6 @@ class Dashboard:
             avg_cycle_time = efficiency_df['Cycle time'].mean()
             avg_wait_time = efficiency_df['Wait Time Days'].mean()
             avg_active_time = efficiency_df['Active Time Days'].mean()
-            # FIX: Calculate efficiency from the other average metrics for consistency
             avg_efficiency = (avg_active_time / avg_cycle_time) * 100 if avg_cycle_time > 0 else 0
             
             c1, c2, c3, c4 = st.columns(4)
@@ -1012,14 +1107,14 @@ class Dashboard:
             st.plotly_chart(chart, use_container_width=True)
             with st.expander("Where is the time going? (Time in Status)", expanded=True):
                 st.markdown("""
-                These charts show how long items spend in each status, helping you identify the biggest delays in your process. Use the tabs to switch between the **85th Percentile** view, to understand outlier scenarios, and the **Average** view for the typical experience.
+                These charts show how long items spend in each status...
                 """)
                 
                 p85_tab_exp, avg_tab_exp = st.tabs(["85th Percentile Time", "Average Time"])
                 status_cols = list(self.status_mapping.values())
 
                 with p85_tab_exp:
-                    st.markdown("This chart shows the **85th percentile** time spent in each status. This means 85% of items moved to the next status within this time.")
+                    st.markdown("This chart shows the **85th percentile** time spent in each status...")
                     p85_chart, _ = ChartGenerator.create_85th_time_in_status_chart(self.filtered_df, status_cols)
                     if p85_chart:
                         st.plotly_chart(p85_chart, use_container_width=True)
@@ -1091,9 +1186,19 @@ class Dashboard:
         col1, col2 = st.columns(2)
 
         with col1:
-            self.selections["start_status"] = st.selectbox("Define your 'Start' status for Cycle Time calculation", status_options, key="cycle_time_start")
+            self.selections["start_status"] = st.selectbox(
+                "Define your 'Start' status for Cycle Time calculation", 
+                status_options, 
+                key="cycle_time_start",
+                format_func=clean_value
+            )
         with col2:
-            self.selections["completed_status"] = st.selectbox("Define your 'Done' status for Cycle Time calculation", status_options, key="cycle_time_end")
+            self.selections["completed_status"] = st.selectbox(
+                "Define your 'Done' status for Cycle Time calculation", 
+                status_options, 
+                key="cycle_time_end",
+                format_func=clean_value
+            )
 
         self.selections["start_col"] = self.status_mapping.get(self.selections["start_status"])
         self.selections["completed_col"] = self.status_mapping.get(self.selections["completed_status"])
@@ -1131,23 +1236,34 @@ class Dashboard:
         with ct_tabs[0]:
             with st.expander("How to Read This Chart", icon="🎓"):
                 st.markdown("""
-                - **How to read it:** Each dot is a completed work item. The vertical position of a dot shows its Cycle Time, and the horizontal position shows its completion date. Percentile lines (also known as Service Level Expectations or SLEs) show the percentage of work items that were completed in that time or less. For example, the 85th percentile line shows the point at which 85% of items were completed.
-                - **What patterns to look for:**
-                    - **Predictability:** A tight, dense cluster of dots indicates a more predictable and stable process. Widely scattered dots suggest an unpredictable process with high variability.
-                    - **Clusters of dots:** A group of dots forming a distinct cluster can indicate a change in your process or team that affected delivery speed.
-                    - **Gaps in the data:** Large horizontal gaps where no dots appear may suggest that work is being delivered in large batches rather than a smooth flow, often at the end of a release cycle.
-                    - **Outliers:** Dots with very high Cycle Times often represent items that were blocked by external dependencies, were too large to begin with, or were stuck in a queue for a long time.
+                - **How to read it:** Each dot is a completed work item...
                 """)
             st.markdown("ℹ️ *A small amount of random vertical 'jitter' has been added to separate overlapping points.*")
-            chart = ChartGenerator.create_cycle_time_chart(self.filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
-            if chart: st.plotly_chart(chart, use_container_width=True)
-            else: st.warning("No completed items in the selected date range could be found to display on this chart.")
+            
+            plottable_df = self.filtered_df.dropna(subset=['Start date', 'Completed date', 'Cycle time'])
+            unplotted_df = self.filtered_df[self.filtered_df['Start date'].isna() & self.filtered_df['Completed date'].notna()]
+
+            chart = ChartGenerator.create_cycle_time_chart(plottable_df, self.selections["percentiles"], self.selections['color_blind_mode'])
+            
+            if chart:
+                st.plotly_chart(chart, use_container_width=True)
+                if not unplotted_df.empty:
+                    with st.expander(f"Sanity Check: {len(unplotted_df)} completed item(s) not plotted"):
+                        st.markdown(f"""
+                        The following items are included in the **'Completed Items'** metric above but are **not shown as dots on the chart**.
+                        This is because their cycle time cannot be calculated as they are missing a date in the selected **'Start' status**: `{clean_value(self.selections["start_status"])}`.
+                        This can happen if items skip the start of your workflow.
+                        """)
+                        display_cols = ['Key', 'Summary', 'Status', 'Work type', 'Completed date']
+                        existing_display_cols = [col for col in display_cols if col in unplotted_df.columns]
+                        st.dataframe(unplotted_df[existing_display_cols], use_container_width=True, hide_index=True)
+            else: 
+                st.warning("No completed items in the selected date range could be found to display on this chart.")
+
         with ct_tabs[1]:
             with st.expander("How to Read This Chart", icon="🎓"):
                 st.markdown("""
-                - **How to Read It:** Each bubble's position shows the cycle time and completion date, but its **size** indicates the *number of items* finished at that exact point. A larger bubble means more items were completed in a batch.
-                - **Patterns to Look For:** A healthy flow is often represented by a stream of **small, frequent bubbles**.
-                - **Anti-Patterns:** Watch out for very **large, infrequent bubbles**. This can indicate that work is being delivered in big batches (e.g., at the end of a sprint) rather than flowing smoothly.
+                - **How to Read It:** Each bubble's position shows the cycle time and completion date...
                 """)
             st.markdown("ℹ️ *Bubbles represent one or more items completed on the same day with the same cycle time.*")
             chart = ChartGenerator.create_cycle_time_bubble_chart(self.filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
@@ -1156,9 +1272,7 @@ class Dashboard:
         with ct_tabs[2]:
             with st.expander("How to Read This Chart", icon="🎓"):
                 st.markdown("""
-                - **How to Read It:** This statistical chart summarizes your cycle time for each period. The **box** shows the range where the middle 50% of your work was completed. The **line inside the box** is the median (50th percentile). The dots are individual work items, often highlighting outliers.
-                - **Patterns to Look For:** A stable, predictable process is indicated by boxes that are **short and at a consistent height** over time. This means your cycle time is not varying wildly.
-                - **Anti-Patterns:** Watch out for boxes that get **taller over time** (increasing variability and unpredictability) or a median line that is **consistently trending upwards** (a clear warning that your average cycle time is getting longer).
+                - **How to Read It:** This statistical chart summarizes your cycle time for each period...
                 """)
             self.selections["box_plot_interval"] = st.selectbox("Group Box Plot by", ["Weekly", "Monthly"], index=0)
             chart = ChartGenerator.create_cycle_time_box_plot(self.filtered_df, self.selections["box_plot_interval"], self.selections["percentiles"], self.selections['color_blind_mode'])
@@ -1173,7 +1287,7 @@ class Dashboard:
             status_cols = list(self.status_mapping.values())
 
             with p85_tab:
-                st.markdown("This chart shows the **85th percentile** time spent in each status. This means 85% of items moved to the next status within this time.")
+                st.markdown("This chart shows the **85th percentile** time spent in each status...")
                 p85_chart, p85_data = ChartGenerator.create_85th_time_in_status_chart(self.filtered_df, status_cols)
                 if p85_chart:
                     st.plotly_chart(p85_chart, use_container_width=True)
