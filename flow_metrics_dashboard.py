@@ -1213,25 +1213,32 @@ class Dashboard:
             st.error(error_msg)
             return
 
+        # --- FIX: Calculate Summary Stats from a broader dataset FIRST ---
+        # Apply global filters (Work Type, etc.) to the raw data
+        stats_source_df = self._apply_all_filters(self.raw_df, apply_date_filter=False)
+        
+        # Calculate stats based on the selected "Done" status
+        total_items = len(stats_source_df)
+        completed_items = stats_source_df[self.selections["completed_col"]].apply(lambda x: pd.notna(DataProcessor._extract_latest_date(x))).sum()
+        in_progress_items = total_items - completed_items
+        
+        m1, m2, m3 = st.columns(3)
+        m1.metric("📊 Total Items in Filter", total_items)
+        m2.metric("✅ Completed Items", completed_items)
+        m3.metric("🔄 Still In Progress", in_progress_items)
+        # --- END FIX ---
+
         self.processed_df = DataProcessor.process_dates(self.raw_df, self.selections["start_col"], self.selections["completed_col"])
         if self.processed_df is None:
              st.warning("Could not calculate Cycle Time with the selected statuses. Please check your selections.")
              return
 
         self.filtered_df = self._apply_all_filters(self.processed_df, apply_date_filter=True)
-        cycle_stats = StatsCalculator.cycle_time_stats(self.filtered_df)
-        summary_stats = StatsCalculator.summary_stats(self.filtered_df)
         
-        if cycle_stats is None:
+        if self.filtered_df.empty or self.filtered_df['Completed date'].isna().all():
             st.warning("No completed items found for the selected criteria. Unable to display Cycle Time charts.")
-            self.filtered_df = pd.DataFrame() 
             return
         
-        m1, m2, m3 = st.columns(3)
-        m1.metric("📊 Total Items in Filter", summary_stats['total'])
-        m2.metric("✅ Completed Items", summary_stats['completed'])
-        m3.metric("🔄 Still In Progress", summary_stats['in_progress'])
-
         ct_tabs = st.tabs(["Scatter Plot", "Bubble Chart", "Box Plot", "Distribution (Histogram)", "Time in Status"])
         with ct_tabs[0]:
             with st.expander("How to Read This Chart", icon="🎓"):
