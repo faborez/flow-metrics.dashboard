@@ -984,15 +984,28 @@ class Dashboard:
         df = source_df.copy()
         if self.selections.get("exclude_long_cycle_times") and 'Cycle time' in df.columns: df = df[df['Cycle time'] <= 365]
         if "All" not in self.selections.get("work_types", ["All"]): df = df[df["Work type"].isin(self.selections["work_types"])]
+        
         if 'dynamic_filters_to_show' in st.session_state:
             for f_name in st.session_state.dynamic_filters_to_show:
                 selection = self.selections.get(f_name)
-                if selection and f_name in df.columns:
-                    if Config.FILTER_TYPE_HINTS.get(f_name, "multi") == "single" and selection != "All": df = df[df[f_name] == selection]
-                    elif "All" not in selection:
-                        pattern = '|'.join(r'\b' + re.escape(str(s)) + r'\b' for s in selection)
-                        df = df[df[f_name].astype(str).str.contains(pattern, na=False, regex=True)]
-        if apply_date_filter and 'Completed date' in df.columns: df = _apply_date_filter(df, 'Completed date', self.selections["date_range"], self.selections["custom_start_date"], self.selections["custom_end_date"])
+                # f_name is the raw column name (e.g., "High Level Estimate-DPID")
+                # selection contains the values selected by the user, which are already clean.
+                if selection and "All" not in selection and f_name in df.columns:
+                    
+                    def check_row(val):
+                        if pd.isna(val):
+                            return 'Not Estimated' in selection
+                        # Handle comma-separated values by cleaning each part
+                        parts = [clean_value(p.strip()) for p in str(val).split(',')]
+                        # Also handle the case where the original value was blank
+                        if not any(parts) or parts == ['']:
+                            return 'Not Estimated' in selection
+                        return any(p in selection for p in parts)
+                    
+                    df = df[df[f_name].apply(check_row)]
+
+        if apply_date_filter and 'Completed date' in df.columns: 
+            df = _apply_date_filter(df, 'Completed date', self.selections["date_range"], self.selections["custom_start_date"], self.selections["custom_end_date"])
         return df
 
     def _display_charts(self):
