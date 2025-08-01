@@ -978,13 +978,20 @@ class Dashboard:
     def _get_unique_values(self, series: pd.Series, filter_type: str) -> List[str]:
         if series.dropna().empty: return []
         
-        # FIX: Replace empty strings with a more descriptive generic label "None"
+        # Replace empty strings with a more descriptive generic label "None"
         series = series.replace('', 'None').replace(np.nan, 'None')
 
         if filter_type == "multi":
-            return sorted(series.astype(str).str.split(',').explode().str.strip().unique())
+            unique_vals = sorted(series.astype(str).str.split(',').explode().str.strip().unique())
         else:
-            return sorted(series.unique())
+            unique_vals = sorted(series.unique())
+            
+        # If "None" is in the list, move it to the front
+        if "None" in unique_vals:
+            unique_vals.remove("None")
+            unique_vals.insert(0, "None")
+            
+        return unique_vals
 
     def _apply_all_filters(self, source_df: pd.DataFrame, apply_date_filter: bool) -> pd.DataFrame:
         if source_df is None: return pd.DataFrame()
