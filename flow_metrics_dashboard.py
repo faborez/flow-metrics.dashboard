@@ -1187,6 +1187,10 @@ class Dashboard:
         st.session_state[prev_key] = st.session_state[key]
 
     def _display_sidebar(self, date_bounds_df: DataFrame):
+        # 1. Call the new toggle menu here so it appears at the very top
+        self._render_tab_toggles()
+        
+        # 2. The rest of your sidebar renders below it
         self._display_static_global_filters(date_bounds_df)
         self._sidebar_chart_controls()
         self._display_dynamic_filters()
@@ -1319,12 +1323,76 @@ class Dashboard:
             df = _apply_date_filter(df, 'Completed date', self.selections["date_range"], self.selections["custom_start_date"], self.selections["custom_end_date"])
         return df
 
+    
+    def _render_tab_toggles(self):
+        with st.sidebar.expander("⚙️ Customize Dashboard View", expanded=False):
+            st.markdown("**Select Tabs to Display:**")
+            
+            # Define main tabs and their default visibility
+            if 'visible_tabs' not in st.session_state:
+                st.session_state.visible_tabs = {                    
+                    "📈 Cycle Time": True,
+                    "🔄 Process Flow": False,
+                    "📊 Work Item Age": True,
+                    "⏱️ Flow Efficiency": False,
+                    "🔄 WIP Trend": True,
+                    "📊 Throughput": True,
+                    "🔮 Throughput Forecast": True,
+                    "📊 Estimates Analysis": True
+                }
+                
+            # Define Cycle Time sub-tabs and their default visibility
+            if 'visible_cycle_time_tabs' not in st.session_state:
+                st.session_state.visible_cycle_time_tabs = {
+                    "Scatter Plot": True,
+                    "Time in Status": True,
+                    "Bubble Chart": False,
+                    "Box Plot": False,
+                    "Distribution (Histogram)": False,                    
+                }
+            
+            # Generate checkboxes for the main tabs
+            for tab_name in st.session_state.visible_tabs.keys():
+                st.session_state.visible_tabs[tab_name] = st.checkbox(
+                    tab_name, 
+                    value=st.session_state.visible_tabs[tab_name]
+                )
+                
+                # If the main Cycle Time tab is checked, show the faux-expander toggle
+                if tab_name == "📈 Cycle Time" and st.session_state.visible_tabs[tab_name]:
+                    
+                    # This toggle acts as our collapsible menu button
+                    show_ct_subs = st.toggle("↳ ⚙️ Configure Sub-tabs", key="ct_sub_expander", value=False)
+                    
+                    if show_ct_subs:
+                        for sub_tab in st.session_state.visible_cycle_time_tabs.keys():
+                            st.session_state.visible_cycle_time_tabs[sub_tab] = st.checkbox(
+                                f"◦ {sub_tab}", 
+                                value=st.session_state.visible_cycle_time_tabs[sub_tab],
+                                key=f"ct_toggle_{sub_tab}"
+                            )
+    
     def _display_charts(self):
         st.markdown("---")
 
-        tab_list = ["📈 Cycle Time", "🔄 Process Flow", "📊 Work Item Age", "⏱️ Flow Efficiency", "🔄 WIP Trend", "📊 Throughput", "🔮 Throughput Forecast"]
+        # 1. Define the base list of standard tabs in the order they should appear
+        all_possible_tabs = [
+            "📈 Cycle Time", "🔄 Process Flow", 
+            "📊 Work Item Age", "⏱️ Flow Efficiency", "🔄 WIP Trend", 
+            "📊 Throughput", "🔮 Throughput Forecast"
+        ]
         
-        # Strictly map the clean Display Name to the possible Jira column names
+        # 2. Build the final tab list by checking the user's toggle selections
+        tab_list = []
+        if 'visible_tabs' in st.session_state:
+            for tab in all_possible_tabs:
+                if st.session_state.visible_tabs.get(tab, True):
+                    tab_list.append(tab)
+        else:
+            # Fallback just in case the sidebar hasn't rendered yet
+            tab_list = [t for t in all_possible_tabs if t not in ["⭐ Summary", "⭐ Summary 2.0"]]
+        
+        # 3. Dynamic logic for Estimates Analysis
         estimation_mappings = {
             'Story Points': ['Story Points', 'Story Point Estimate'],
             'Original Estimate': ['Original estimate', 'Original Estimate'],
@@ -1338,12 +1406,19 @@ class Dashboard:
             if found_col:
                 self.available_est_mappings[display_name] = found_col
         
+        # Only add Estimates Analysis if the data exists AND the user has it toggled ON
         if self.available_est_mappings:
-            tab_list.append("📊 Estimates Analysis")
+            if st.session_state.get('visible_tabs', {}).get("📊 Estimates Analysis", True):
+                tab_list.append("📊 Estimates Analysis")
+        
+        # 4. Safety catch if the user unchecks literally everything
+        if not tab_list:
+            st.info("👆 Please select at least one tab from the 'Customize Dashboard View' menu in the sidebar.")
+            return
             
         tabs = st.tabs(tab_list)
         
-        # The summary functions remain mapped here, preserving the code for future development
+        # 5. Map and render the active tabs
         tab_map = {
             "⭐ Summary": self._display_summary_tab,
             "⭐ Summary 2.0": self._display_summary_2_tab,
@@ -1356,6 +1431,7 @@ class Dashboard:
             "🔮 Throughput Forecast": self._display_forecast_charts, 
             "📊 Estimates Analysis": self._display_estimates_analysis_tab
         }
+        
         for i, tab_title in enumerate(tab_list):
             with tabs[i]: 
                 if tab_title in tab_map:
@@ -1800,100 +1876,119 @@ class Dashboard:
         if filtered_df.empty or filtered_df['Completed date'].isna().all():
             st.warning("No completed items found for the selected criteria. Unable to display Cycle Time charts.")
             return
+            
+        # --- NEW DYNAMIC SUB-TAB LOGIC ---
+        all_ct_tabs = ["Scatter Plot", "Time in Status", "Bubble Chart", "Box Plot", "Distribution (Histogram)"]
         
-        ct_tabs = st.tabs(["Scatter Plot", "Bubble Chart", "Box Plot", "Distribution (Histogram)", "Time in Status"])
-        with ct_tabs[0]:
-            with st.expander("How to Read This Chart", icon="🎓"):
-                st.markdown("""
-                - **How to read it:** Each dot is a completed work item. The vertical position of a dot shows its Cycle Time, and the horizontal position shows its completion date. Percentile lines (also known as Service Level Expectations or SLEs) show the percentage of work items that were completed in that time or less. For example, the 85th percentile line shows the point at which 85% of items were completed.
-                - **What patterns to look for:**
-                    - **Predictability:** A tight, dense cluster of dots indicates a more predictable and stable process. Widely scattered dots suggest an unpredictable process with high variability.
-                    - **Clusters of dots:** A group of dots forming a distinct cluster can indicate a change in your process or team that affected delivery speed.
-                    - **Gaps in the data:** Large horizontal gaps where no dots appear may suggest that work is being delivered in large batches rather than a smooth flow, often at the end of a release cycle.
-                    - **Outliers:** Dots with very high Cycle Times often represent items that were blocked by external dependencies, were too large to begin with, or were stuck in a queue for a long time.
-                """)
-            st.markdown("ℹ️ *A small amount of random vertical 'jitter' has been added to separate overlapping points.*")
-            
-            plottable_df = filtered_df.dropna(subset=['Start date', 'Completed date', 'Cycle time'])
-            unplotted_df = filtered_df[filtered_df['Start date'].isna() & filtered_df['Completed date'].notna()]
+        active_ct_tabs = []
+        if 'visible_cycle_time_tabs' in st.session_state:
+            active_ct_tabs = [t for t in all_ct_tabs if st.session_state.visible_cycle_time_tabs.get(t, True)]
+        else:
+            active_ct_tabs = all_ct_tabs # Fallback just in case
 
-            chart = ChartGenerator.create_cycle_time_chart(plottable_df, self.selections["percentiles"], self.selections['color_blind_mode'])
-            
-            if chart:
-                st.plotly_chart(chart, use_container_width=True)
-                if not unplotted_df.empty:
-                    with st.expander(f"Sanity Check: {len(unplotted_df)} completed item(s) not plotted"):
-                        st.markdown(f"""
-                        The following items are included in the **'Completed Items'** metric above but are **not shown as dots on the chart**.
-                        This is because their cycle time cannot be calculated as they are missing a date in the selected **'Start' status**: `{clean_value(self.selections["start_status"])}`.
-                        This can happen if items skip the start of your workflow.
+        if not active_ct_tabs:
+            st.info("👆 Please select at least one Cycle Time chart from the 'Customize Dashboard View' menu in the sidebar.")
+            return
+
+        ct_tabs = st.tabs(active_ct_tabs)
+        
+        for i, tab_name in enumerate(active_ct_tabs):
+            with ct_tabs[i]:
+                if tab_name == "Scatter Plot":
+                    with st.expander("How to Read This Chart", icon="🎓"):
+                        st.markdown("""
+                        - **How to read it:** Each dot is a completed work item. The vertical position of a dot shows its Cycle Time, and the horizontal position shows its completion date. Percentile lines (also known as Service Level Expectations or SLEs) show the percentage of work items that were completed in that time or less. For example, the 85th percentile line shows the point at which 85% of items were completed.
+                        - **What patterns to look for:**
+                            - **Predictability:** A tight, dense cluster of dots indicates a more predictable and stable process. Widely scattered dots suggest an unpredictable process with high variability.
+                            - **Clusters of dots:** A group of dots forming a distinct cluster can indicate a change in your process or team that affected delivery speed.
+                            - **Gaps in the data:** Large horizontal gaps where no dots appear may suggest that work is being delivered in large batches rather than a smooth flow, often at the end of a release cycle.
+                            - **Outliers:** Dots with very high Cycle Times often represent items that were blocked by external dependencies, were too large to begin with, or were stuck in a queue for a long time.
                         """)
-                        display_cols = ['Key', 'Summary', 'Status', 'Work type', 'Completed date']
-                        existing_display_cols = [col for col in display_cols if col in unplotted_df.columns]
-                        st.dataframe(unplotted_df[existing_display_cols], use_container_width=True, hide_index=True)
-            else: 
-                st.warning("No completed items in the selected date range could be found to display on this chart.")
+                    st.markdown("ℹ️ *A small amount of random vertical 'jitter' has been added to separate overlapping points.*")
+                    
+                    plottable_df = filtered_df.dropna(subset=['Start date', 'Completed date', 'Cycle time'])
+                    unplotted_df = filtered_df[filtered_df['Start date'].isna() & filtered_df['Completed date'].notna()]
 
-        with ct_tabs[1]:
-            with st.expander("How to Read This Chart", icon="🎓"):
-                st.markdown("""
-                - **How to Read It:** Each bubble's position shows the cycle time and completion date, but its **size** indicates the *number of items* finished at that exact point. A larger bubble means more items were completed in a batch.
-                - **Patterns to Look For:** A healthy flow is often represented by a stream of **small, frequent bubbles**.
-                - **Anti-Patterns:** Watch out for very **large, infrequent bubbles**. This can indicate that work is being delivered in big batches (e.g., at the end of a sprint) rather than flowing smoothly.
-                """)
-            st.markdown("ℹ️ *Bubbles represent one or more items completed on the same day with the same cycle time.*")
-            chart = ChartGenerator.create_cycle_time_bubble_chart(filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
-            if chart: st.plotly_chart(chart, use_container_width=True)
-            else: st.warning("No completed items in the selected date range could be found to display on this chart.")
-        with ct_tabs[2]:
-            with st.expander("How to Read This Chart", icon="🎓"):
-                st.markdown("""
-                - **How to Read It:** This statistical chart summarizes your cycle time for each period. The **box** shows the range where the middle 50% of your work was completed. The **line inside the box** is the median (50th percentile). The dots are individual work items, often highlighting outliers.
-                - **Patterns to Look For:** A stable, predictable process is indicated by boxes that are **short and at a consistent height** over time. This means your cycle time is not varying wildly.
-                - **Anti-Patterns:** Watch out for boxes that get **taller over time** (increasing variability and unpredictability) or a median line that is **consistently trending upwards** (a clear warning that your average cycle time is getting longer).
-                """)
-            self.selections["box_plot_interval"] = st.selectbox("Group Box Plot by", ["Weekly", "Monthly"], index=0)
-            chart = ChartGenerator.create_cycle_time_box_plot(filtered_df, self.selections["box_plot_interval"], self.selections["percentiles"], self.selections['color_blind_mode'])
-            if chart: st.plotly_chart(chart, use_container_width=True)
-            else: st.warning("No completed items in the selected date range could be found to display on this chart.")
-        with ct_tabs[3]:
-            chart = ChartGenerator.create_cycle_time_histogram(filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
-            if chart: st.plotly_chart(chart, use_container_width=True)
-            else: st.warning("No completed items in the selected date range could be found to display on this chart.")
-        with ct_tabs[4]:
-            p85_tab, avg_tab = st.tabs(["85th Percentile Time", "Average Time"])
-            status_cols = list(self.status_mapping.values())
+                    chart = ChartGenerator.create_cycle_time_chart(plottable_df, self.selections["percentiles"], self.selections['color_blind_mode'])
+                    
+                    if chart:
+                        st.plotly_chart(chart, use_container_width=True)
+                        if not unplotted_df.empty:
+                            with st.expander(f"Sanity Check: {len(unplotted_df)} completed item(s) not plotted"):
+                                st.markdown(f"""
+                                The following items are included in the **'Completed Items'** metric above but are **not shown as dots on the chart**.
+                                This is because their cycle time cannot be calculated as they are missing a date in the selected **'Start' status**: `{clean_value(self.selections["start_status"])}`.
+                                This can happen if items skip the start of your workflow.
+                                """)
+                                display_cols = ['Key', 'Summary', 'Status', 'Work type', 'Completed date']
+                                existing_display_cols = [col for col in display_cols if col in unplotted_df.columns]
+                                st.dataframe(unplotted_df[existing_display_cols], use_container_width=True, hide_index=True)
+                    else: 
+                        st.warning("No completed items in the selected date range could be found to display on this chart.")
 
-            with p85_tab:
-                st.markdown("This chart shows the **85th percentile** time spent in each status. This means 85% of items moved to the next status within this time.")
-                p85_chart, p85_data = ChartGenerator.create_85th_time_in_status_chart(filtered_df, status_cols)
-                if p85_chart:
-                    st.plotly_chart(p85_chart, use_container_width=True)
-                    if p85_data is not None and not p85_data.empty:
-                        st.divider()
-                        num_statuses = len(p85_data)
-                        cols = st.columns(min(num_statuses, 5), gap="small")
-                        for i, row in p85_data.iterrows():
-                            col = cols[i % 5]
-                            col.metric(label=row['Status'], value=f"{int(row['85th Percentile Time (Days)'])} days")
-                else:
-                    st.warning("Not enough data to display the 85th Percentile Time in Status chart.")
+                elif tab_name == "Bubble Chart":
+                    with st.expander("How to Read This Chart", icon="🎓"):
+                        st.markdown("""
+                        - **How to Read It:** Each bubble's position shows the cycle time and completion date, but its **size** indicates the *number of items* finished at that exact point. A larger bubble means more items were completed in a batch.
+                        - **Patterns to Look For:** A healthy flow is often represented by a stream of **small, frequent bubbles**.
+                        - **Anti-Patterns:** Watch out for very **large, infrequent bubbles**. This can indicate that work is being delivered in big batches (e.g., at the end of a sprint) rather than flowing smoothly.
+                        """)
+                    st.markdown("ℹ️ *Bubbles represent one or more items completed on the same day with the same cycle time.*")
+                    chart = ChartGenerator.create_cycle_time_bubble_chart(filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
+                    if chart: st.plotly_chart(chart, use_container_width=True)
+                    else: st.warning("No completed items in the selected date range could be found to display on this chart.")
 
-            with avg_tab:
-                st.markdown("This chart shows the **average** time items spend in each status column of your raw data export.")
-                chart, chart_data = ChartGenerator.create_time_in_status_chart(filtered_df, status_cols)
-                if chart:
-                    st.plotly_chart(chart, use_container_width=True)
-                    if chart_data is not None and not chart_data.empty:
-                        st.divider()
-                        num_statuses = len(chart_data)
-                        cols = st.columns(min(num_statuses, 5), gap="small")
-                        for i, row in chart_data.iterrows():
-                            col = cols[i % 5]
-                            col.metric(label=row['Status'], value=f"{int(row['Average Time (Days)'])} days")
-                else:
-                    st.warning("Not enough data was found for the selected statuses to calculate the average time spent in each.")
+                elif tab_name == "Box Plot":
+                    with st.expander("How to Read This Chart", icon="🎓"):
+                        st.markdown("""
+                        - **How to Read It:** This statistical chart summarizes your cycle time for each period. The **box** shows the range where the middle 50% of your work was completed. The **line inside the box** is the median (50th percentile). The dots are individual work items, often highlighting outliers.
+                        - **Patterns to Look For:** A stable, predictable process is indicated by boxes that are **short and at a consistent height** over time. This means your cycle time is not varying wildly.
+                        - **Anti-Patterns:** Watch out for boxes that get **taller over time** (increasing variability and unpredictability) or a median line that is **consistently trending upwards** (a clear warning that your average cycle time is getting longer).
+                        """)
+                    self.selections["box_plot_interval"] = st.selectbox("Group Box Plot by", ["Weekly", "Monthly"], index=0, key="box_plot_select")
+                    chart = ChartGenerator.create_cycle_time_box_plot(filtered_df, self.selections["box_plot_interval"], self.selections["percentiles"], self.selections['color_blind_mode'])
+                    if chart: st.plotly_chart(chart, use_container_width=True)
+                    else: st.warning("No completed items in the selected date range could be found to display on this chart.")
 
+                elif tab_name == "Distribution (Histogram)":
+                    chart = ChartGenerator.create_cycle_time_histogram(filtered_df, self.selections["percentiles"], self.selections['color_blind_mode'])
+                    if chart: st.plotly_chart(chart, use_container_width=True)
+                    else: st.warning("No completed items in the selected date range could be found to display on this chart.")
+
+                elif tab_name == "Time in Status":
+                    p85_tab, avg_tab = st.tabs(["85th Percentile Time", "Average Time"])
+                    status_cols = list(self.status_mapping.values())
+
+                    with p85_tab:
+                        st.markdown("This chart shows the **85th percentile** time spent in each status. This means 85% of items moved to the next status within this time.")
+                        p85_chart, p85_data = ChartGenerator.create_85th_time_in_status_chart(filtered_df, status_cols)
+                        if p85_chart:
+                            st.plotly_chart(p85_chart, use_container_width=True)
+                            if p85_data is not None and not p85_data.empty:
+                                st.divider()
+                                num_statuses = len(p85_data)
+                                cols = st.columns(min(num_statuses, 5), gap="small")
+                                for j, row in p85_data.iterrows():
+                                    col = cols[j % 5]
+                                    col.metric(label=row['Status'], value=f"{int(row['85th Percentile Time (Days)'])} days")
+                        else:
+                            st.warning("Not enough data to display the 85th Percentile Time in Status chart.")
+
+                    with avg_tab:
+                        st.markdown("This chart shows the **average** time items spend in each status column of your raw data export.")
+                        chart, chart_data = ChartGenerator.create_time_in_status_chart(filtered_df, status_cols)
+                        if chart:
+                            st.plotly_chart(chart, use_container_width=True)
+                            if chart_data is not None and not chart_data.empty:
+                                st.divider()
+                                num_statuses = len(chart_data)
+                                cols = st.columns(min(num_statuses, 5), gap="small")
+                                for j, row in chart_data.iterrows():
+                                    col = cols[j % 5]
+                                    col.metric(label=row['Status'], value=f"{int(row['Average Time (Days)'])} days")
+                        else:
+                            st.warning("Not enough data was found for the selected statuses to calculate the average time spent in each.")
+                            
     def _display_estimates_analysis_tab(self):
         """Displays the Analysis chart for various estimation units."""
         st.header("Estimates Analysis")
