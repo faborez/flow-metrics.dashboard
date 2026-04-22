@@ -1326,7 +1326,7 @@ class Dashboard:
     
     def _render_tab_toggles(self):
         with st.sidebar.expander("⚙️ Customize Dashboard View", expanded=False):
-            st.markdown("**Select Tabs to Display:**")
+            st.markdown("**Select Charts to Display:**")
             
             # Define main tabs and their default visibility
             if 'visible_tabs' not in st.session_state:
